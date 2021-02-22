@@ -282,9 +282,9 @@ func generateClusterConfig(cmd *cobra.Command, existing *config.ClusterConfig, k
 
 			if !found {
 				if autoSelectedRepository == "" {
-					exit.Message(reason.InetReposUnavailable, "None of the known repositories are accessible. Consider specifying an alternative image repository with --image-repository flag")
+					exit.Message(reason.InetReposUnavailable, "Native of the known repositories are accessible. Consider specifying an alternative image repository with --image-repository flag")
 				} else {
-					out.WarningT("None of the known repositories in your location are accessible. Using {{.image_repository_name}} as fallback.", out.V{"image_repository_name": autoSelectedRepository})
+					out.WarningT("Native of the known repositories in your location are accessible. Using {{.image_repository_name}} as fallback.", out.V{"image_repository_name": autoSelectedRepository})
 				}
 			}
 
@@ -401,7 +401,7 @@ func generateClusterConfig(cmd *cobra.Command, existing *config.ClusterConfig, k
 	}
 
 	var kubeNodeName string
-	if driver.BareMetal(cc.Driver) {
+	if driver.IsNative(cc.Driver) {
 		kubeNodeName = "m01"
 	}
 	return createNode(cc, kubeNodeName, existing)
