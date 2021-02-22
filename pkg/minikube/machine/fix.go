@@ -72,7 +72,7 @@ func fixHost(api libmachine.API, cc *config.ClusterConfig, n *config.Node) (*hos
 		return h, err
 	}
 
-	// Avoid reprovisioning "none" driver because provision.Detect requires SSH
+	// Avoid reprovisioning "native" driver because provision.Detect requires SSH
 	if !driver.IsNative(h.Driver.DriverName()) {
 		e := engineOptions(*cc)
 		h.HostOptions.EngineOptions.Env = e.Env

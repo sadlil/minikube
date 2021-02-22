@@ -632,7 +632,7 @@ func validateCacheCmd(ctx context.Context, t *testing.T, profile string) {
 	defer PostMortemLogs(t, profile)
 
 	if NativeDriver() {
-		t.Skipf("skipping: cache unsupported by none")
+		t.Skipf("skipping: cache unsupported by native")
 	}
 
 	t.Run("cache", func(t *testing.T) {
@@ -1105,7 +1105,7 @@ func validateAddonsCmd(ctx context.Context, t *testing.T, profile string) {
 func validateSSHCmd(ctx context.Context, t *testing.T, profile string) {
 	defer PostMortemLogs(t, profile)
 	if NativeDriver() {
-		t.Skipf("skipping: ssh unsupported by none")
+		t.Skipf("skipping: ssh unsupported by native")
 	}
 	mctx, cancel := context.WithTimeout(ctx, Minutes(1))
 	defer cancel()
@@ -1243,7 +1243,7 @@ func validateFileSync(ctx context.Context, t *testing.T, profile string) {
 	defer PostMortemLogs(t, profile)
 
 	if NativeDriver() {
-		t.Skipf("skipping: ssh unsupported by none")
+		t.Skipf("skipping: ssh unsupported by native")
 	}
 
 	vp := vmSyncTestPath()
@@ -1271,7 +1271,7 @@ func validateCertSync(ctx context.Context, t *testing.T, profile string) {
 	defer PostMortemLogs(t, profile)
 
 	if NativeDriver() {
-		t.Skipf("skipping: ssh unsupported by none")
+		t.Skipf("skipping: ssh unsupported by native")
 	}
 
 	testPem := filepath.Join(*testdataDir, "minikube_test.pem")

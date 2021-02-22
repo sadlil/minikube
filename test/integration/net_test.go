@@ -92,7 +92,7 @@ func TestNetworkPlugins(t *testing.T) {
 				}
 				if !t.Failed() {
 					t.Run("KubeletFlags", func(t *testing.T) {
-						// none does not support 'minikube ssh'
+						// native does not support 'minikube ssh'
 						rr, err := Run(t, exec.CommandContext(ctx, Target(), "ssh", "-p", profile, "pgrep -a kubelet"))
 						if NativeDriver() {
 							rr, err = Run(t, exec.CommandContext(ctx, "pgrep", "-a", "kubelet"))

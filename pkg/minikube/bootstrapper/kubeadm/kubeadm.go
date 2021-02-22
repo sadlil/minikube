@@ -192,12 +192,12 @@ func (k *Bootstrapper) init(cfg config.ClusterConfig) error {
 		"FileAvailable--etc-kubernetes-manifests-kube-apiserver.yaml",
 		"FileAvailable--etc-kubernetes-manifests-kube-controller-manager.yaml",
 		"FileAvailable--etc-kubernetes-manifests-etcd.yaml",
-		"Port-10250", // For "none" users who already have a kubelet online
-		"Swap",       // For "none" users who have swap configured
+		"Port-10250", // For "native" users who already have a kubelet online
+		"Swap",       // For "native" users who have swap configured
 	}
 	if version.GE(semver.MustParse("1.20.0")) {
 		ignore = append(ignore,
-			"Mem", // For "none" users who have too little memory
+			"Mem", // For "native" users who have too little memory
 		)
 	}
 	ignore = append(ignore, bsutil.SkipAdditionalPreflights[r.Name()]...)

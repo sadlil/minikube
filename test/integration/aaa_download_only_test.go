@@ -92,7 +92,7 @@ func TestDownloadOnly(t *testing.T) {
 
 			preloadExists := false
 			t.Run("preload-exists", func(t *testing.T) {
-				// skip for none, as native driver does not have preload feature.
+				// skip for native, as native driver does not have preload feature.
 				if NativeDriver() {
 					t.Skip("Native driver does not have preload")
 				}
@@ -108,7 +108,7 @@ func TestDownloadOnly(t *testing.T) {
 			})
 
 			t.Run("cached-images", func(t *testing.T) {
-				// skip verify for cache images if --driver=none
+				// skip verify for cache images if --driver=native
 				if NativeDriver() {
 					t.Skip("Native driver has no cache")
 				}
