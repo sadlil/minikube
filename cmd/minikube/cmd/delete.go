@@ -40,6 +40,7 @@ import (
 	"k8s.io/minikube/pkg/minikube/config"
 	"k8s.io/minikube/pkg/minikube/constants"
 	"k8s.io/minikube/pkg/minikube/cruntime"
+	"k8s.io/minikube/pkg/minikube/delete"
 	"k8s.io/minikube/pkg/minikube/driver"
 	"k8s.io/minikube/pkg/minikube/exit"
 	"k8s.io/minikube/pkg/minikube/kubeconfig"
@@ -84,6 +85,24 @@ type DeletionError struct {
 
 func (error DeletionError) Error() string {
 	return error.Err.Error()
+}
+
+var hostAndDirsDeleter = func(api libmachine.API, cc *config.ClusterConfig, profileName string) error {
+	if err := killMountProcess(); err != nil {
+		out.FailureT("Failed to kill mount process: {{.error}}", out.V{"error": err})
+	}
+
+	deleteHosts(api, cc)
+
+	// In case DeleteHost didn't complete the job.
+	deleteProfileDirectory(profileName)
+	deleteMachineDirectories(cc)
+
+	if err := deleteConfig(profileName); err != nil {
+		return err
+	}
+
+	return deleteContext(profileName)
 }
 
 func init() {
@@ -144,7 +163,7 @@ func runDelete(cmd *cobra.Command, args []string) {
 	if purge && len(profilesToDelete) > 1 && !deleteAll {
 		out.ErrT(style.Notice, "Multiple minikube profiles were found - ")
 		for _, p := range profilesToDelete {
-			out.Step(style.Notice, "    - {{.profile}}", out.V{"profile": p.Name})
+			out.Styled(style.Notice, "    - {{.profile}}", out.V{"profile": p.Name})
 		}
 		exit.Message(reason.Usage, "Usage: minikube delete --all --purge")
 	}
@@ -185,9 +204,8 @@ func runDelete(cmd *cobra.Command, args []string) {
 		}
 
 		if orphan {
-			// TODO: generalize for non-KIC drivers: #8040
-			deletePossibleKicLeftOver(delCtx, cname, driver.Docker)
-			deletePossibleKicLeftOver(delCtx, cname, driver.Podman)
+			delete.PossibleLeftOvers(delCtx, cname, driver.Docker)
+			delete.PossibleLeftOvers(delCtx, cname, driver.Podman)
 		}
 	}
 
@@ -210,91 +228,28 @@ func DeleteProfiles(profiles []*config.Profile) []error {
 	klog.Infof("DeleteProfiles")
 	var errs []error
 	for _, profile := range profiles {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-		defer cancel()
-		err := deleteProfile(ctx, profile)
-		if err != nil {
-			mm, loadErr := machine.LoadMachine(profile.Name)
-
-			if !profile.IsValid() || (loadErr != nil || !mm.IsValid()) {
-				invalidProfileDeletionErrs := deleteInvalidProfile(profile)
-				if len(invalidProfileDeletionErrs) > 0 {
-					errs = append(errs, invalidProfileDeletionErrs...)
-				}
-			} else {
-				errs = append(errs, err)
-			}
-		}
+		errs = append(errs, deleteProfileTimeout(profile)...)
 	}
 	return errs
 }
 
-// TODO: remove and/or move to delete package: #8040
-func deletePossibleKicLeftOver(ctx context.Context, cname string, driverName string) {
-	bin := ""
-	switch driverName {
-	case driver.Docker:
-		bin = oci.Docker
-	case driver.Podman:
-		bin = oci.Podman
-	default:
-		return
-	}
+func deleteProfileTimeout(profile *config.Profile) []error {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
 
-	if _, err := exec.LookPath(bin); err != nil {
-		klog.Infof("skipping deletePossibleKicLeftOver for %s: %v", bin, err)
-		return
-	}
+	if err := deleteProfile(ctx, profile); err != nil {
 
-	klog.Infof("deleting possible KIC leftovers for %s (driver=%s) ...", cname, driverName)
-	delLabel := fmt.Sprintf("%s=%s", oci.ProfileLabelKey, cname)
-	cs, err := oci.ListContainersByLabel(ctx, bin, delLabel)
-	if err == nil && len(cs) > 0 {
-		for _, c := range cs {
-			out.Step(style.DeletingHost, `Deleting container "{{.name}}" ...`, out.V{"name": cname})
-			err := oci.DeleteContainer(ctx, bin, c)
-			if err != nil { // it will error if there is no container to delete
-				klog.Errorf("error deleting container %q. You may want to delete it manually :\n%v", cname, err)
+		mm, loadErr := machine.LoadMachine(profile.Name)
+		if !profile.IsValid() || (loadErr != nil || !mm.IsValid()) {
+			invalidProfileDeletionErrs := deleteInvalidProfile(profile)
+			if len(invalidProfileDeletionErrs) > 0 {
+				return invalidProfileDeletionErrs
 			}
-
+		} else {
+			return []error{err}
 		}
 	}
-
-	if bin == oci.Podman {
-		// podman volume does not support --filter
-		err := oci.RemoveVolume(bin, cname)
-		if err != nil {
-			klog.Warningf("error deleting volume %s (might be okay).'\n:%v", cname, err)
-		}
-	}
-
-	errs := oci.DeleteAllVolumesByLabel(ctx, bin, delLabel)
-	if errs != nil { // it will not error if there is nothing to delete
-		klog.Warningf("error deleting volumes (might be okay).\nTo see the list of volumes run: 'docker volume ls'\n:%v", errs)
-	}
-
-	if bin == oci.Podman {
-		// podman network does not support --filter
-		err := oci.RemoveNetwork(bin, cname)
-		if err != nil {
-			klog.Warningf("error deleting network %s (might be okay).'\n:%v", cname, err)
-		}
-	}
-
-	errs = oci.DeleteKICNetworks(bin)
-	if errs != nil {
-		klog.Warningf("error deleting leftover networks (might be okay).\nTo see the list of networks: 'docker network ls'\n:%v", errs)
-	}
-
-	if bin == oci.Podman {
-		// podman prune does not support --filter
-		return
-	}
-
-	errs = oci.PruneAllVolumesByLabel(ctx, bin, delLabel)
-	if len(errs) > 0 { // it will not error if there is nothing to delete
-		klog.Warningf("error pruning volume (might be okay):\n%v", errs)
-	}
+	return nil
 }
 
 func deleteProfile(ctx context.Context, profile *config.Profile) error {
@@ -307,10 +262,13 @@ func deleteProfile(ctx context.Context, profile *config.Profile) error {
 
 		// if driver is oci driver, delete containers and volumes
 		if driver.IsKIC(profile.Config.Driver) {
+			if err := unpauseIfNeeded(profile); err != nil {
+				klog.Warningf("failed to unpause %s : %v", profile.Name, err)
+			}
 			out.Step(style.DeletingHost, `Deleting "{{.profile_name}}" in {{.driver_name}} ...`, out.V{"profile_name": profile.Name, "driver_name": profile.Config.Driver})
 			for _, n := range profile.Config.Nodes {
 				machineName := config.MachineName(*profile.Config, n)
-				deletePossibleKicLeftOver(ctx, machineName, profile.Config.Driver)
+				delete.PossibleLeftOvers(ctx, machineName, profile.Config.Driver)
 			}
 		}
 	} else {
@@ -342,25 +300,55 @@ func deleteProfile(ctx context.Context, profile *config.Profile) error {
 		}
 	}
 
-	if err := killMountProcess(); err != nil {
-		out.FailureT("Failed to kill mount process: {{.error}}", out.V{"error": err})
-	}
-
-	deleteHosts(api, cc)
-
-	// In case DeleteHost didn't complete the job.
-	deleteProfileDirectory(profile.Name)
-	deleteMachineDirectories(cc)
-
-	if err := deleteConfig(profile.Name); err != nil {
+	if err := hostAndDirsDeleter(api, cc, profile.Name); err != nil {
 		return err
 	}
 
-	if err := deleteContext(profile.Name); err != nil {
-		return err
-	}
 	out.Step(style.Deleted, `Removed all traces of the "{{.name}}" cluster.`, out.V{"name": profile.Name})
 	return nil
+}
+
+func unpauseIfNeeded(profile *config.Profile) error {
+	// there is a known issue with removing kicbase container with paused containerd/crio containers inside
+	// unpause it before we delete it
+	crName := profile.Config.KubernetesConfig.ContainerRuntime
+	if crName == "docker" {
+		return nil
+	}
+
+	api, err := machine.NewAPIClient()
+	if err != nil {
+		return err
+	}
+	defer api.Close()
+
+	host, err := machine.LoadHost(api, profile.Name)
+	if err != nil {
+		return err
+	}
+
+	r, err := machine.CommandRunner(host)
+	if err != nil {
+		exit.Error(reason.InternalCommandRunner, "Failed to get command runner", err)
+	}
+
+	cr, err := cruntime.New(cruntime.Config{Type: crName, Runner: r})
+	if err != nil {
+		exit.Error(reason.InternalNewRuntime, "Failed to create runtime", err)
+	}
+
+	paused, err := cluster.CheckIfPaused(cr, nil)
+	if err != nil {
+		return err
+	}
+
+	if !paused {
+		return nil
+	}
+
+	klog.Infof("Unpause cluster %q", profile.Name)
+	_, err = cluster.Unpause(cr, r, nil)
+	return err
 }
 
 func deleteHosts(api libmachine.API, cc *config.ClusterConfig) {
@@ -375,7 +363,7 @@ func deleteHosts(api libmachine.API, cc *config.ClusterConfig) {
 					klog.Infof("Host %s does not exist. Proceeding ahead with cleanup.", machineName)
 				default:
 					out.FailureT("Failed to delete cluster: {{.error}}", out.V{"error": err})
-					out.Step(style.Notice, `You may need to manually remove the "{{.name}}" VM from your hypervisor`, out.V{"name": machineName})
+					out.Styled(style.Notice, `You may need to manually remove the "{{.name}}" VM from your hypervisor`, out.V{"name": machineName})
 				}
 			}
 		}

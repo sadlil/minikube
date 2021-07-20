@@ -6,21 +6,23 @@ reviewers:
   - sharifelgamal
   - RA489
   - medyagh
-  - josedonizetti
   - blueelvis
-  - priyawadhwa
   - prasadkatti
   - ilya-zuyev
+  - prezha	
+  - spowelljr
 approvers:
   - tstromberg
   - afbjorklund
   - sharifelgamal
   - medyagh
-  - josedonizetti
-  - priyawadhwa
   - ilya-zuyev
+  - spowelljr
 emeritus_approvers:
   - dlorenc
   - luxas
   - jimmidyson
   - r2d4
+  - aaron-prindle
+  - priyawadhwa
+  - josedonizetti

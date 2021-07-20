@@ -46,9 +46,20 @@ make -j 16 \
   out/minikube_${DEB_VER}_amd64.deb \
   out/minikube_${DEB_VER}_arm64.deb \
   out/docker-machine-driver-kvm2_$(make deb_version_base).deb \
+  out/docker-machine-driver-kvm2_${DEB_VER}_amd64.deb \
+  out/docker-machine-driver-kvm2_${DEB_VER}_arm64.deb \
 && failed=$? || failed=$?
 
-"out/minikube-$(go env GOOS)-$(go env GOARCH)" version
+BUILT_VERSION=$("out/minikube-$(go env GOOS)-$(go env GOARCH)" version)
+echo ${BUILT_VERSION}
+
+COMMIT=$(echo ${BUILT_VERSION} | grep 'commit:' | awk '{print $2}')
+if (echo ${COMMIT} | grep -q dirty); then
+  echo "'minikube version' reports dirty commit: ${COMMIT}"
+  exit 1
+fi
+
+
 
 gsutil cp "gs://${bucket}/logs/index.html" \
   "gs://${bucket}/logs/${ghprbPullId}/index.html"
@@ -58,20 +69,10 @@ if [[ "${failed}" -ne 0 ]]; then
   exit "${failed}"
 fi
 
-git diff ${ghprbActualCommit} --name-only \
-  $(git merge-base origin/master ${ghprbActualCommit}) \
-  | grep -q deploy/iso/minikube && rebuild=1 || rebuild=0
-
-if [[ "${rebuild}" -eq 1 ]]; then
-  echo "ISO changes detected ... rebuilding ISO"
-  make release-iso
-fi
-
-
 cp -r test/integration/testdata out/
 
 # Don't upload the buildroot artifacts if they exist
-rm -r out/buildroot || true
+rm -rf out/buildroot
 
 # At this point, the out directory contains the jenkins scripts (populated by jenkins),
 # testdata, and our build output. Push the changes to GCS so that worker nodes can re-use them.

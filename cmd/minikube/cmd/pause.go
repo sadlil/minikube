@@ -55,7 +55,7 @@ func runPause(cmd *cobra.Command, args []string) {
 	register.SetEventLogPath(localpath.EventLog(ClusterFlagValue()))
 	register.Reg.SetStep(register.Pausing)
 
-	klog.Infof("namespaces: %v keys: %v", namespaces, viper.AllSettings())
+	klog.InfoS("namespaces", namespaces, "keys", viper.AllSettings())
 	if allNamespaces {
 		namespaces = nil // all
 	} else if len(namespaces) == 0 {
@@ -104,7 +104,7 @@ func runPause(cmd *cobra.Command, args []string) {
 }
 
 func init() {
-	pauseCmd.Flags().StringSliceVarP(&namespaces, "--namespaces", "n", constants.DefaultNamespaces, "namespaces to pause")
+	pauseCmd.Flags().StringSliceVarP(&namespaces, "namespaces", "n", constants.DefaultNamespaces, "namespaces to pause")
 	pauseCmd.Flags().BoolVarP(&allNamespaces, "all-namespaces", "A", false, "If set, pause all namespaces")
 	pauseCmd.Flags().StringVarP(&outputFormat, "output", "o", "text", "Format to print stdout in. Options include: [text,json]")
 }

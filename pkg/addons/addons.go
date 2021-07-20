@@ -42,13 +42,17 @@ import (
 	"k8s.io/minikube/pkg/minikube/out"
 	"k8s.io/minikube/pkg/minikube/out/register"
 	"k8s.io/minikube/pkg/minikube/reason"
-	"k8s.io/minikube/pkg/minikube/storageclass"
 	"k8s.io/minikube/pkg/minikube/style"
+	"k8s.io/minikube/pkg/minikube/sysinit"
 	"k8s.io/minikube/pkg/util/retry"
 )
 
-// defaultStorageClassProvisioner is the name of the default storage class provisioner
-const defaultStorageClassProvisioner = "standard"
+// Force is used to override checks for addons
+var Force bool = false
+
+// Refresh is used to refresh pods in specific cases when an addon is enabled
+// Currently only used for gcp-auth
+var Refresh bool = false
 
 // RunCallbacks runs all actions associated to an addon, but does not set it (thread-safe)
 func RunCallbacks(cc *config.ClusterConfig, name string, value string) error {
@@ -137,6 +141,9 @@ func EnableOrDisableAddon(cc *config.ClusterConfig, name string, val string) err
 
 	// check addon status before enabling/disabling it
 	if isAddonAlreadySet(cc, addon, enable) {
+		if addon.Name() == "gcp-auth" {
+			return nil
+		}
 		klog.Warningf("addon %s should already be in state %v", name, val)
 		if !enable {
 			return nil
@@ -147,7 +154,7 @@ func EnableOrDisableAddon(cc *config.ClusterConfig, name string, val string) err
 	if strings.HasPrefix(name, "ingress") && enable {
 		if driver.IsKIC(cc.Driver) {
 			if runtime.GOOS == "windows" {
-				out.Step(style.Tip, `After the addon is enabled, please run "minikube tunnel" and your ingress resources would be available at "127.0.0.1"`)
+				out.Styled(style.Tip, `After the addon is enabled, please run "minikube tunnel" and your ingress resources would be available at "127.0.0.1"`)
 			} else if runtime.GOOS != "linux" {
 				exit.Message(reason.Usage, `Due to networking limitations of driver {{.driver_name}} on {{.os_name}}, {{.addon_name}} addon is not supported.
 Alternatively to use this addon you can use a vm-based driver:
@@ -156,10 +163,10 @@ Alternatively to use this addon you can use a vm-based driver:
 
 To track the update on this work in progress feature please check:
 https://github.com/kubernetes/minikube/issues/7332`, out.V{"driver_name": cc.Driver, "os_name": runtime.GOOS, "addon_name": name})
+			} else if driver.BareMetal(cc.Driver) {
+				out.WarningT(`Due to networking limitations of driver {{.driver_name}}, {{.addon_name}} addon is not fully supported. Try using a different driver.`,
+					out.V{"driver_name": cc.Driver, "addon_name": name})
 			}
-		} else if driver.BareMetal(cc.Driver) {
-			exit.Message(reason.Usage, `Due to networking limitations of driver {{.driver_name}}, {{.addon_name}} addon is not supported. Try using a different driver.`,
-				out.V{"driver_name": cc.Driver, "addon_name": name})
 		}
 	}
 
@@ -174,7 +181,6 @@ https://github.com/kubernetes/minikube/issues/7332`, out.V{"driver_name": cc.Dri
 		}
 	}
 
-	// TODO(r2d4): config package should not reference API, pull this out
 	api, err := machine.NewAPIClient()
 	if err != nil {
 		return errors.Wrap(err, "machine client")
@@ -184,6 +190,12 @@ https://github.com/kubernetes/minikube/issues/7332`, out.V{"driver_name": cc.Dri
 	cp, err := config.PrimaryControlPlane(cc)
 	if err != nil {
 		exit.Error(reason.GuestCpConfig, "Error getting primary control plane", err)
+	}
+
+	// Persist images even if the machine is running so starting gets the correct images.
+	images, customRegistries, err := assets.SelectAndPersistImages(addon, cc)
+	if err != nil {
+		exit.Error(reason.HostSaveProfile, "Failed to persist images", err)
 	}
 
 	mName := config.MachineName(*cc, cp)
@@ -199,18 +211,34 @@ https://github.com/kubernetes/minikube/issues/7332`, out.V{"driver_name": cc.Dri
 			if err != nil {
 				return errors.Wrap(err, "registry port")
 			}
-			out.Step(style.Tip, `Registry addon on with {{.driver}} uses {{.port}} please use that instead of default 5000`, out.V{"driver": cc.Driver, "port": port})
-			out.Step(style.Documentation, `For more information see: https://minikube.sigs.k8s.io/docs/drivers/{{.driver}}`, out.V{"driver": cc.Driver})
+			if enable {
+				out.Boxed(`Registry addon with {{.driver}} driver uses port {{.port}} please use that instead of default port 5000`, out.V{"driver": cc.Driver, "port": port})
+			}
+			out.Styled(style.Documentation, `For more information see: https://minikube.sigs.k8s.io/docs/drivers/{{.driver}}`, out.V{"driver": cc.Driver})
 		}
 	}
 
-	cmd, err := machine.CommandRunner(host)
+	runner, err := machine.CommandRunner(host)
 	if err != nil {
 		return errors.Wrap(err, "command runner")
 	}
 
-	data := assets.GenerateTemplateData(addon, cc.KubernetesConfig)
-	return enableOrDisableAddonInternal(cc, addon, cmd, data, enable)
+	if name == "auto-pause" && !enable { // needs to be disabled before deleting the service file in the internal disable
+		if err := sysinit.New(runner).DisableNow("auto-pause"); err != nil {
+			klog.ErrorS(err, "failed to disable", "service", "auto-pause")
+		}
+	}
+
+	var networkInfo assets.NetworkInfo
+	if len(cc.Nodes) >= 1 {
+		networkInfo.ControlPlaneNodeIP = cc.Nodes[0].IP
+		networkInfo.ControlPlaneNodePort = cc.Nodes[0].Port
+	} else {
+		out.WarningT("At least needs control plane nodes to enable addon")
+	}
+
+	data := assets.GenerateTemplateData(addon, cc.KubernetesConfig, networkInfo, images, customRegistries)
+	return enableOrDisableAddonInternal(cc, addon, runner, data, enable)
 }
 
 func isAddonAlreadySet(cc *config.ClusterConfig, addon *assets.Addon, enable bool) bool {
@@ -226,7 +254,7 @@ func isAddonAlreadySet(cc *config.ClusterConfig, addon *assets.Addon, enable boo
 	return false
 }
 
-func enableOrDisableAddonInternal(cc *config.ClusterConfig, addon *assets.Addon, cmd command.Runner, data interface{}, enable bool) error {
+func enableOrDisableAddonInternal(cc *config.ClusterConfig, addon *assets.Addon, runner command.Runner, data interface{}, enable bool) error {
 	deployFiles := []string{}
 
 	for _, addon := range addon.Assets {
@@ -245,13 +273,13 @@ func enableOrDisableAddonInternal(cc *config.ClusterConfig, addon *assets.Addon,
 
 		if enable {
 			klog.Infof("installing %s", fPath)
-			if err := cmd.Copy(f); err != nil {
+			if err := runner.Copy(f); err != nil {
 				return err
 			}
 		} else {
 			klog.Infof("Removing %+v", fPath)
 			defer func() {
-				if err := cmd.Remove(f); err != nil {
+				if err := runner.Remove(f); err != nil {
 					klog.Warningf("error removing %s; addon should still be disabled as expected", fPath)
 				}
 			}()
@@ -263,7 +291,7 @@ func enableOrDisableAddonInternal(cc *config.ClusterConfig, addon *assets.Addon,
 
 	// Retry, because sometimes we race against an apiserver restart
 	apply := func() error {
-		_, err := cmd.RunCmd(kubectlCommand(cc, deployFiles, enable))
+		_, err := runner.RunCmd(kubectlCommand(cc, deployFiles, enable))
 		if err != nil {
 			klog.Warningf("apply failed, will retry: %v", err)
 		}
@@ -273,73 +301,12 @@ func enableOrDisableAddonInternal(cc *config.ClusterConfig, addon *assets.Addon,
 	return retry.Expo(apply, 250*time.Millisecond, 2*time.Minute)
 }
 
-// enableOrDisableStorageClasses enables or disables storage classes
-func enableOrDisableStorageClasses(cc *config.ClusterConfig, name string, val string) error {
-	klog.Infof("enableOrDisableStorageClasses %s=%v on %q", name, val, cc.Name)
-	enable, err := strconv.ParseBool(val)
-	if err != nil {
-		return errors.Wrap(err, "Error parsing boolean")
-	}
-
-	class := defaultStorageClassProvisioner
-	if name == "storage-provisioner-gluster" {
-		class = "glusterfile"
-	}
-
-	api, err := machine.NewAPIClient()
-	if err != nil {
-		return errors.Wrap(err, "machine client")
-	}
-	defer api.Close()
-
-	cp, err := config.PrimaryControlPlane(cc)
-	if err != nil {
-		return errors.Wrap(err, "getting control plane")
-	}
-	if !machine.IsRunning(api, config.MachineName(*cc, cp)) {
-		klog.Warningf("%q is not running, writing %s=%v to disk and skipping enablement", config.MachineName(*cc, cp), name, val)
-		return EnableOrDisableAddon(cc, name, val)
-	}
-
-	storagev1, err := storageclass.GetStoragev1(cc.Name)
-	if err != nil {
-		return errors.Wrapf(err, "Error getting storagev1 interface %v ", err)
-	}
-
-	if enable {
-		// Only StorageClass for 'name' should be marked as default
-		err = storageclass.SetDefaultStorageClass(storagev1, class)
-		if err != nil {
-			return errors.Wrapf(err, "Error making %s the default storage class", class)
-		}
-	} else {
-		// Unset the StorageClass as default
-		err := storageclass.DisableDefaultStorageClass(storagev1, class)
-		if err != nil {
-			return errors.Wrapf(err, "Error disabling %s as the default storage class", class)
-		}
-	}
-
-	return EnableOrDisableAddon(cc, name, val)
-}
-
 func verifyAddonStatus(cc *config.ClusterConfig, name string, val string) error {
-	return verifyAddonStatusInternal(cc, name, val, "kube-system")
-}
-
-func verifyGCPAuthAddon(cc *config.ClusterConfig, name string, val string) error {
-	enable, err := strconv.ParseBool(val)
-	if err != nil {
-		return errors.Wrapf(err, "parsing bool: %s", name)
+	ns := "kube-system"
+	if name == "ingress" {
+		ns = "ingress-nginx"
 	}
-	err = verifyAddonStatusInternal(cc, name, val, "gcp-auth")
-
-	if enable && err == nil {
-		out.Step(style.Notice, "Your GCP credentials will now be mounted into every pod created in the {{.name}} cluster.", out.V{"name": cc.Name})
-		out.Step(style.Notice, "If you don't want your credentials mounted into a specific pod, add a label with the `gcp-auth-skip-secret` key to your pod configuration.")
-	}
-
-	return err
+	return verifyAddonStatusInternal(cc, name, val, ns)
 }
 
 func verifyAddonStatusInternal(cc *config.ClusterConfig, name string, val string, ns string) error {

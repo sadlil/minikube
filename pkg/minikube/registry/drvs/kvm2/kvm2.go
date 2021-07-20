@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"os/user"
 	"path/filepath"
 	"strings"
 	"time"
@@ -46,6 +47,7 @@ func init() {
 		Alias:    []string{driver.AliasKVM},
 		Config:   configure,
 		Status:   status,
+		Default:  true,
 		Priority: registry.Preferred,
 	}); err != nil {
 		panic(fmt.Sprintf("register failed: %v", err))
@@ -67,6 +69,7 @@ type kvmDriver struct {
 	GPU            bool
 	Hidden         bool
 	ConnectionURI  string
+	NUMANodeCount  int
 }
 
 func configure(cc config.ClusterConfig, n config.Node) (interface{}, error) {
@@ -80,7 +83,7 @@ func configure(cc config.ClusterConfig, n config.Node) (interface{}, error) {
 		Memory:         cc.Memory,
 		CPU:            cc.CPUs,
 		Network:        cc.KVMNetwork,
-		PrivateNetwork: "minikube-net",
+		PrivateNetwork: privateNetwork(cc),
 		Boot2DockerURL: download.LocalISOResource(cc.MinikubeISO),
 		DiskSize:       cc.DiskSize,
 		DiskPath:       filepath.Join(localpath.MiniPath(), "machines", name, fmt.Sprintf("%s.rawdisk", name)),
@@ -88,7 +91,16 @@ func configure(cc config.ClusterConfig, n config.Node) (interface{}, error) {
 		GPU:            cc.KVMGPU,
 		Hidden:         cc.KVMHidden,
 		ConnectionURI:  cc.KVMQemuURI,
+		NUMANodeCount:  cc.KVMNUMACount,
 	}, nil
+}
+
+// if network is not user-defined it defaults to "mk-<cluster_name>"
+func privateNetwork(cc config.ClusterConfig) string {
+	if cc.Network == "" {
+		return fmt.Sprintf("mk-%s", cc.KubernetesConfig.ClusterName)
+	}
+	return cc.Network
 }
 
 // defaultURI returns the QEMU URI to connect to for health checks
@@ -101,8 +113,8 @@ func defaultURI() string {
 }
 
 func status() registry.State {
-	// Allow no more than 2 seconds for querying state
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	// Allow no more than 6 seconds for querying state
+	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
 	defer cancel()
 
 	path, err := exec.LookPath("virsh")
@@ -110,16 +122,48 @@ func status() registry.State {
 		return registry.State{Error: err, Fix: "Install libvirt", Doc: docURL}
 	}
 
-	// On Ubuntu 19.10 (libvirt 5.4), this fails if LIBVIRT_DEFAULT_URI is unset
-	cmd := exec.CommandContext(ctx, path, "domcapabilities", "--virttype", "kvm")
-	cmd.Env = append(os.Environ(), fmt.Sprintf("LIBVIRT_DEFAULT_URI=%s", defaultURI()))
-
-	out, err := cmd.CombinedOutput()
+	member, err := isCurrentUserLibvirtGroupMember()
 	if err != nil {
 		return registry.State{
 			Installed: true,
 			Running:   true,
-			Error:     fmt.Errorf("%s failed:\n%s", strings.Join(cmd.Args, " "), strings.TrimSpace(string(out))),
+			// keep the error messsage in sync with reason.providerIssues(Kind.ID: "PR_KVM_USER_PERMISSION") regexp
+			Error:  fmt.Errorf("libvirt group membership check failed:\n%v", err.Error()),
+			Reason: "PR_KVM_USER_PERMISSION",
+			Fix:    "Check that libvirtd is properly installed and that you are a member of the appropriate libvirt group (remember to relogin for group changes to take effect!)",
+			Doc:    docURL,
+		}
+	}
+	if !member {
+		return registry.State{
+			Installed: true,
+			Running:   true,
+			// keep the error messsage in sync with reason.providerIssues(Kind.ID: "PR_KVM_USER_PERMISSION") regexp
+			Error:  fmt.Errorf("libvirt group membership check failed:\nuser is not a member of the appropriate libvirt group"),
+			Reason: "PR_KVM_USER_PERMISSION",
+			Fix:    "Check that libvirtd is properly installed and that you are a member of the appropriate libvirt group (remember to relogin for group changes to take effect!)",
+			Doc:    docURL,
+		}
+	}
+
+	// On Ubuntu 19.10 (libvirt 5.4), this fails if LIBVIRT_DEFAULT_URI is unset
+	cmd := exec.CommandContext(ctx, path, "domcapabilities", "--virttype", "kvm")
+	cmd.Env = append(os.Environ(), fmt.Sprintf("LIBVIRT_DEFAULT_URI=%s", defaultURI()))
+	out, err := cmd.CombinedOutput()
+	if ctx.Err() == context.DeadlineExceeded {
+		return registry.State{
+			Installed: true,
+			Running:   false,
+			Error:     fmt.Errorf("%s timed out", strings.Join(cmd.Args, " ")),
+			Fix:       "Check that the libvirtd service is running and the socket is ready",
+			Doc:       docURL,
+		}
+	}
+	if err != nil {
+		return registry.State{
+			Installed: true,
+			Running:   true,
+			Error:     fmt.Errorf("%s failed:\n%s\n%v", strings.Join(cmd.Args, " "), strings.TrimSpace(string(out)), err),
 			Fix:       "Follow your Linux distribution instructions for configuring KVM",
 			Doc:       docURL,
 		}
@@ -133,9 +177,32 @@ func status() registry.State {
 			Installed: true,
 			Running:   true,
 			Error:     fmt.Errorf("%s failed:\n%s", strings.Join(cmd.Args, " "), strings.TrimSpace(string(out))),
-			Fix:       "Check that libvirtd is properly installed and that you are a member of the appropriate libvirt group",
+			Fix:       "Check that libvirtd is properly installed and that you are a member of the appropriate libvirt group (remember to relogin for group changes to take effect!)",
 			Doc:       docURL,
 		}
 	}
-	return registry.State{Installed: true, Healthy: true}
+
+	return registry.State{Installed: true, Healthy: true, Running: true}
+}
+
+// isCurrentUserLibvirtGroupMember returns if the current user is a member of "libvirt*" group.
+func isCurrentUserLibvirtGroupMember() (bool, error) {
+	usr, err := user.Current()
+	if err != nil {
+		return false, fmt.Errorf("error getting current user: %w", err)
+	}
+	gids, err := usr.GroupIds()
+	if err != nil {
+		return false, fmt.Errorf("error getting current user's GIDs: %w", err)
+	}
+	for _, gid := range gids {
+		grp, err := user.LookupGroupId(gid)
+		if err != nil {
+			return false, fmt.Errorf("error getting current user's group with GID %q: %w", gid, err)
+		}
+		if strings.HasPrefix(grp.Name, "libvirt") {
+			return true, nil
+		}
+	}
+	return false, nil
 }

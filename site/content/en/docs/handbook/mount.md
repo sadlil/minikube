@@ -34,23 +34,23 @@ This directory may then be referenced from a Kubernetes manifest, for example:
     "name": "ubuntu"
   },
   "spec": {
-        "containers": [
+    "containers": [
+      {
+        "name": "ubuntu",
+        "image": "ubuntu:18.04",
+        "args": ["bash"],
+        "stdin": true,
+        "stdinOnce": true,
+        "tty": true,
+        "workingDir": "/host",
+        "volumeMounts": [
           {
-            "name": "ubuntu",
-            "image": "ubuntu:18.04",
-            "args": [
-              "bash"
-            ],
-            "stdin": true,
-            "stdinOnce": true,
-            "tty": true,
-            "workingDir": "/host",
-            "volumeMounts": [{
-              "mountPath": "/host",
-              "name": "host-mount"
-            }]
+            "mountPath": "/host",
+            "name": "host-mount"
           }
-        ],
+        ]
+      }
+    ],
     "volumes": [
       {
         "name": "host-mount",
@@ -72,7 +72,7 @@ Some hypervisors, have built-in host folder sharing. Driver mounts are reliable 
 | VirtualBox | Linux | /home | /hosthome |
 | VirtualBox | macOS | /Users | /Users |
 | VirtualBox | Windows | C://Users | /c/Users |
-| VMware Fusion | macOS | /Users | /Users |
+| VMware Fusion | macOS | /Users | /mnt/hgfs/Users |
 | KVM | Linux | Unsupported | |
 | HyperKit | Linux | Unsupported (see NFS mounts) | |
 

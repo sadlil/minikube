@@ -32,10 +32,11 @@ import (
 
 	// WARNING: Do not use path/filepath in this package unless you want bizarre Windows paths
 
-	"github.com/blang/semver"
+	"github.com/blang/semver/v4"
 	"github.com/docker/machine/libmachine"
 	"github.com/docker/machine/libmachine/state"
 	"github.com/pkg/errors"
+	core "k8s.io/api/core/v1"
 	meta "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/kubernetes"
@@ -185,9 +186,9 @@ func (k *Bootstrapper) init(cfg config.ClusterConfig) error {
 	}
 
 	ignore := []string{
-		fmt.Sprintf("DirAvailable-%s", strings.Replace(vmpath.GuestManifestsDir, "/", "-", -1)),
-		fmt.Sprintf("DirAvailable-%s", strings.Replace(vmpath.GuestPersistentDir, "/", "-", -1)),
-		fmt.Sprintf("DirAvailable-%s", strings.Replace(bsutil.EtcdDataDir(), "/", "-", -1)),
+		fmt.Sprintf("DirAvailable-%s", strings.ReplaceAll(vmpath.GuestManifestsDir, "/", "-")),
+		fmt.Sprintf("DirAvailable-%s", strings.ReplaceAll(vmpath.GuestPersistentDir, "/", "-")),
+		fmt.Sprintf("DirAvailable-%s", strings.ReplaceAll(bsutil.EtcdDataDir(), "/", "-")),
 		"FileAvailable--etc-kubernetes-manifests-kube-scheduler.yaml",
 		"FileAvailable--etc-kubernetes-manifests-kube-apiserver.yaml",
 		"FileAvailable--etc-kubernetes-manifests-kube-controller-manager.yaml",
@@ -239,11 +240,13 @@ func (k *Bootstrapper) init(cfg config.ClusterConfig) error {
 		bsutil.InvokeKubeadm(cfg.KubernetesConfig.KubernetesVersion), conf, extraFlags, strings.Join(ignore, ",")))
 	c.Stdout = kw
 	c.Stderr = kw
+	var wg sync.WaitGroup
+	wg.Add(1)
 	sc, err := k.c.StartCmd(c)
 	if err != nil {
 		return errors.Wrap(err, "start")
 	}
-	go outputKubeadmInitSteps(kr)
+	go outputKubeadmInitSteps(kr, &wg)
 	if _, err := k.c.WaitCmd(sc); err != nil {
 		if ctx.Err() == context.DeadlineExceeded {
 			return ErrInitTimedout
@@ -254,11 +257,13 @@ func (k *Bootstrapper) init(cfg config.ClusterConfig) error {
 		}
 		return errors.Wrap(err, "wait")
 	}
-	if err := k.applyCNI(cfg); err != nil {
+	kw.Close()
+	wg.Wait()
+
+	if err := k.applyCNI(cfg, true); err != nil {
 		return errors.Wrap(err, "apply cni")
 	}
 
-	var wg sync.WaitGroup
 	wg.Add(3)
 
 	go func() {
@@ -288,17 +293,16 @@ func (k *Bootstrapper) init(cfg config.ClusterConfig) error {
 }
 
 // outputKubeadmInitSteps streams the pipe and outputs the current step
-func outputKubeadmInitSteps(logs io.Reader) {
+func outputKubeadmInitSteps(logs io.Reader, wg *sync.WaitGroup) {
 	type step struct {
 		logTag       string
 		registerStep register.RegStep
-		stepMessage  string
 	}
 
 	steps := []step{
-		{logTag: "certs", registerStep: register.PreparingKubernetesCerts, stepMessage: "Generating certificates and keys ..."},
-		{logTag: "control-plane", registerStep: register.PreparingKubernetesControlPlane, stepMessage: "Booting up control plane ..."},
-		{logTag: "bootstrap-token", registerStep: register.PreparingKubernetesBootstrapToken, stepMessage: "Configuring RBAC rules ..."},
+		{logTag: "certs", registerStep: register.PreparingKubernetesCerts},
+		{logTag: "control-plane", registerStep: register.PreparingKubernetesControlPlane},
+		{logTag: "bootstrap-token", registerStep: register.PreparingKubernetesBootstrapToken},
 	}
 	nextStepIndex := 0
 
@@ -313,14 +317,30 @@ func outputKubeadmInitSteps(logs io.Reader) {
 			continue
 		}
 		register.Reg.SetStep(nextStep.registerStep)
-		out.Step(style.SubStep, nextStep.stepMessage)
+		// because the translation extract (make extract) needs simple strings to be included in translations we have to pass simple strings
+		if nextStepIndex == 0 {
+			out.Step(style.SubStep, "Generating certificates and keys ...")
+		}
+		if nextStepIndex == 1 {
+			out.Step(style.SubStep, "Booting up control plane ...")
+		}
+		if nextStepIndex == 2 {
+			out.Step(style.SubStep, "Configuring RBAC rules ...")
+		}
+
 		nextStepIndex++
 	}
+	wg.Done()
 }
 
 // applyCNI applies CNI to a cluster. Needs to be done every time a VM is powered up.
-func (k *Bootstrapper) applyCNI(cfg config.ClusterConfig) error {
-	cnm, err := cni.New(cfg)
+func (k *Bootstrapper) applyCNI(cfg config.ClusterConfig, registerStep ...bool) error {
+	regStep := false
+	if len(registerStep) > 0 {
+		regStep = registerStep[0]
+	}
+
+	cnm, err := cni.New(&cfg)
 	if err != nil {
 		return errors.Wrap(err, "cni config")
 	}
@@ -329,17 +349,16 @@ func (k *Bootstrapper) applyCNI(cfg config.ClusterConfig) error {
 		return nil
 	}
 
-	register.Reg.SetStep(register.ConfiguringCNI)
-	out.Step(style.CNI, "Configuring {{.name}} (Container Networking Interface) ...", out.V{"name": cnm.String()})
+	// when not on init, can run in parallel and break step output order
+	if regStep {
+		register.Reg.SetStep(register.ConfiguringCNI)
+		out.Step(style.CNI, "Configuring {{.name}} (Container Networking Interface) ...", out.V{"name": cnm.String()})
+	} else {
+		out.Styled(style.CNI, "Configuring {{.name}} (Container Networking Interface) ...", out.V{"name": cnm.String()})
+	}
 
 	if err := cnm.Apply(k.c); err != nil {
 		return errors.Wrap(err, "cni apply")
-	}
-
-	if cfg.KubernetesConfig.ContainerRuntime == constants.CRIO {
-		if err := cruntime.UpdateCRIONet(k.c, cnm.CIDR()); err != nil {
-			return errors.Wrap(err, "update crio")
-		}
 	}
 
 	return nil
@@ -352,7 +371,7 @@ func (k *Bootstrapper) unpause(cfg config.ClusterConfig) error {
 		return err
 	}
 
-	ids, err := cr.ListContainers(cruntime.ListOptions{State: cruntime.Paused, Namespaces: []string{"kube-system"}})
+	ids, err := cr.ListContainers(cruntime.ListContainersOptions{State: cruntime.Paused, Namespaces: []string{"kube-system"}})
 	if err != nil {
 		return errors.Wrap(err, "list paused")
 	}
@@ -471,8 +490,15 @@ func (k *Bootstrapper) WaitForNode(cfg config.ClusterConfig, n config.Node, time
 		return nil
 	}
 
+	if cfg.VerifyComponents[kverify.NodeReadyKey] {
+		name := bsutil.KubeNodeName(cfg, n)
+		if err := kverify.WaitNodeCondition(client, name, core.NodeReady, timeout); err != nil {
+			return errors.Wrap(err, "waiting for node to be ready")
+		}
+	}
+
 	if cfg.VerifyComponents[kverify.ExtraKey] {
-		if err := kverify.WaitExtra(client, kverify.CorePodsList, timeout); err != nil {
+		if err := kverify.WaitExtra(client, kverify.CorePodsLabels, timeout); err != nil {
 			return errors.Wrap(err, "extra waiting")
 		}
 	}
@@ -518,12 +544,6 @@ func (k *Bootstrapper) WaitForNode(cfg config.ClusterConfig, n config.Node, time
 		}
 	}
 
-	if cfg.VerifyComponents[kverify.NodeReadyKey] {
-		if err := kverify.WaitForNodeReady(client, timeout); err != nil {
-			return errors.Wrap(err, "waiting for node to be ready")
-		}
-	}
-
 	klog.Infof("duration metric: took %s to wait for : %+v ...", time.Since(start), cfg.VerifyComponents)
 
 	if err := kverify.NodePressure(client); err != nil {
@@ -548,13 +568,13 @@ func (k *Bootstrapper) needsReconfigure(conf string, hostname string, port int, 
 		klog.Infof("needs reconfigure: configs differ:\n%s", rr.Output())
 		return true
 	}
-
-	st, err := kverify.APIServerStatus(k.c, hostname, port)
+	// cruntime.Enable() may restart kube-apiserver but does not wait for it to return back
+	apiStatusTimeout := 3000 * time.Millisecond
+	st, err := kverify.WaitForAPIServerStatus(k.c, apiStatusTimeout, hostname, port)
 	if err != nil {
 		klog.Infof("needs reconfigure: apiserver error: %v", err)
 		return true
 	}
-
 	if st != state.Running {
 		klog.Infof("needs reconfigure: apiserver in state %s", st)
 		return true
@@ -665,35 +685,6 @@ func (k *Bootstrapper) restartControlPlane(cfg config.ClusterConfig) error {
 		}
 	}
 
-	if cfg.VerifyComponents[kverify.ExtraKey] {
-		// after kubelet is restarted (with 'kubeadm init phase kubelet-start' above),
-		// it appears as to be immediately Ready as well as all kube-system pods,
-		// then (after ~10sec) it realises it has some changes to apply, implying also pods restarts,
-		// and by that time we would exit completely, so we wait until kubelet begins restarting pods
-		klog.Info("waiting for restarted kubelet to initialise ...")
-		start := time.Now()
-		wait := func() error {
-			pods, err := client.CoreV1().Pods("kube-system").List(meta.ListOptions{})
-			if err != nil {
-				return err
-			}
-			for _, pod := range pods.Items {
-				if pod.Labels["tier"] == "control-plane" {
-					if ready, _ := kverify.IsPodReady(&pod); !ready {
-						return nil
-					}
-				}
-			}
-			return fmt.Errorf("kubelet not initialised")
-		}
-		_ = retry.Expo(wait, 250*time.Millisecond, 1*time.Minute)
-		klog.Infof("kubelet initialised")
-		klog.Infof("duration metric: took %s waiting for restarted kubelet to initialise ...", time.Since(start))
-		if err := kverify.WaitExtra(client, kverify.CorePodsList, kconst.DefaultControlPlaneTimeout); err != nil {
-			return errors.Wrap(err, "extra")
-		}
-	}
-
 	cr, err := cruntime.New(cruntime.Config{Type: cfg.KubernetesConfig.ContainerRuntime, Runner: k.c})
 	if err != nil {
 		return errors.Wrap(err, "runtime")
@@ -731,6 +722,35 @@ func (k *Bootstrapper) restartControlPlane(cfg config.ClusterConfig) error {
 		return errors.Wrap(err, "addons")
 	}
 
+	// must be called after applyCNI and `kubeadm phase addon all` (ie, coredns redeploy)
+	if cfg.VerifyComponents[kverify.ExtraKey] {
+		// after kubelet is restarted (with 'kubeadm init phase kubelet-start' above),
+		// it appears as to be immediately Ready as well as all kube-system pods (last observed state),
+		// then (after ~10sec) it realises it has some changes to apply, implying also pods restarts,
+		// and by that time we would exit completely, so we wait until kubelet begins restarting pods
+		klog.Info("waiting for restarted kubelet to initialise ...")
+		start := time.Now()
+		wait := func() error {
+			pods, err := client.CoreV1().Pods(meta.NamespaceSystem).List(context.Background(), meta.ListOptions{LabelSelector: "tier=control-plane"})
+			if err != nil {
+				return err
+			}
+			for _, pod := range pods.Items {
+				if ready, _ := kverify.IsPodReady(&pod); !ready {
+					return nil
+				}
+			}
+			return fmt.Errorf("kubelet not initialised")
+		}
+		_ = retry.Expo(wait, 250*time.Millisecond, 1*time.Minute)
+		klog.Infof("kubelet initialised")
+		klog.Infof("duration metric: took %s waiting for restarted kubelet to initialise ...", time.Since(start))
+
+		if err := kverify.WaitExtra(client, kverify.CorePodsLabels, kconst.DefaultControlPlaneTimeout); err != nil {
+			return errors.Wrap(err, "extra")
+		}
+	}
+
 	if err := bsutil.AdjustResourceLimits(k.c); err != nil {
 		klog.Warningf("unable to adjust resource limits: %v", err)
 	}
@@ -738,36 +758,13 @@ func (k *Bootstrapper) restartControlPlane(cfg config.ClusterConfig) error {
 	return nil
 }
 
-// JoinCluster adds a node to an existing cluster
+// JoinCluster adds new node to an existing cluster.
 func (k *Bootstrapper) JoinCluster(cc config.ClusterConfig, n config.Node, joinCmd string) error {
-	start := time.Now()
-	klog.Infof("JoinCluster: %+v", cc)
-	defer func() {
-		klog.Infof("JoinCluster complete in %s", time.Since(start))
-	}()
-
 	// Join the master by specifying its token
 	joinCmd = fmt.Sprintf("%s --node-name=%s", joinCmd, config.MachineName(cc, n))
 
-	join := func() error {
-		// reset first to clear any possibly existing state
-		_, err := k.c.RunCmd(exec.Command("/bin/bash", "-c", fmt.Sprintf("%s reset -f", bsutil.InvokeKubeadm(cc.KubernetesConfig.KubernetesVersion))))
-		if err != nil {
-			klog.Infof("kubeadm reset failed, continuing anyway: %v", err)
-		}
-
-		_, err = k.c.RunCmd(exec.Command("/bin/bash", "-c", joinCmd))
-		if err != nil {
-			if strings.Contains(err.Error(), "status \"Ready\" already exists in the cluster") {
-				klog.Info("still waiting for the worker node to register with the api server")
-			}
-			return errors.Wrapf(err, "kubeadm join")
-		}
-		return nil
-	}
-
-	if err := retry.Expo(join, 10*time.Second, 3*time.Minute); err != nil {
-		return errors.Wrap(err, "joining cp")
+	if _, err := k.c.RunCmd(exec.Command("/bin/bash", "-c", joinCmd)); err != nil {
+		return errors.Wrapf(err, "kubeadm join")
 	}
 
 	if _, err := k.c.RunCmd(exec.Command("/bin/bash", "-c", "sudo systemctl daemon-reload && sudo systemctl enable kubelet && sudo systemctl start kubelet")); err != nil {
@@ -789,9 +786,17 @@ func (k *Bootstrapper) GenerateToken(cc config.ClusterConfig) (string, error) {
 	joinCmd := r.Stdout.String()
 	joinCmd = strings.Replace(joinCmd, "kubeadm", bsutil.InvokeKubeadm(cc.KubernetesConfig.KubernetesVersion), 1)
 	joinCmd = fmt.Sprintf("%s --ignore-preflight-errors=all", strings.TrimSpace(joinCmd))
-	if cc.KubernetesConfig.CRISocket != "" {
-		joinCmd = fmt.Sprintf("%s --cri-socket %s", joinCmd, cc.KubernetesConfig.CRISocket)
+
+	// avoid "Found multiple CRI sockets, please use --cri-socket to select one: /var/run/dockershim.sock, /var/run/crio/crio.sock" error
+	cr, err := cruntime.New(cruntime.Config{Type: cc.KubernetesConfig.ContainerRuntime, Runner: k.c, Socket: cc.KubernetesConfig.CRISocket})
+	if err != nil {
+		klog.Errorf("cruntime: %v", err)
 	}
+	sp := cr.SocketPath()
+	if sp == "" {
+		sp = kconst.DefaultDockerCRISocket
+	}
+	joinCmd = fmt.Sprintf("%s --cri-socket %s", joinCmd, sp)
 
 	return joinCmd, nil
 }
@@ -827,7 +832,7 @@ func (k *Bootstrapper) DeleteCluster(k8s config.KubernetesConfig) error {
 		klog.Warningf("stop kubelet: %v", err)
 	}
 
-	containers, err := cr.ListContainers(cruntime.ListOptions{Namespaces: []string{"kube-system"}})
+	containers, err := cr.ListContainers(cruntime.ListContainersOptions{Namespaces: []string{"kube-system"}})
 	if err != nil {
 		klog.Warningf("unable to list kube-system containers: %v", err)
 	}
@@ -843,8 +848,7 @@ func (k *Bootstrapper) DeleteCluster(k8s config.KubernetesConfig) error {
 
 // SetupCerts sets up certificates within the cluster.
 func (k *Bootstrapper) SetupCerts(k8s config.KubernetesConfig, n config.Node) error {
-	_, err := bootstrapper.SetupCerts(k.c, k8s, n)
-	return err
+	return bootstrapper.SetupCerts(k.c, k8s, n)
 }
 
 // UpdateCluster updates the control plane with cluster-level info.
@@ -862,12 +866,12 @@ func (k *Bootstrapper) UpdateCluster(cfg config.ClusterConfig) error {
 		return errors.Wrap(err, "runtime")
 	}
 
-	if err := r.Preload(cfg.KubernetesConfig); err != nil {
+	if err := r.Preload(cfg); err != nil {
 		klog.Infof("preload failed, will try to load cached images: %v", err)
 	}
 
 	if cfg.KubernetesConfig.ShouldLoadCachedImages {
-		if err := machine.LoadImages(&cfg, k.c, images, constants.ImageCacheDir); err != nil {
+		if err := machine.LoadCachedImages(&cfg, k.c, images, constants.ImageCacheDir, false); err != nil {
 			out.FailureT("Unable to load cached images: {{.error}}", out.V{"error": err})
 		}
 	}
@@ -1031,7 +1035,7 @@ func (k *Bootstrapper) stopKubeSystem(cfg config.ClusterConfig) error {
 		return errors.Wrap(err, "new cruntime")
 	}
 
-	ids, err := cr.ListContainers(cruntime.ListOptions{Namespaces: []string{"kube-system"}})
+	ids, err := cr.ListContainers(cruntime.ListContainersOptions{Namespaces: []string{"kube-system"}})
 	if err != nil {
 		return errors.Wrap(err, "list")
 	}
@@ -1051,16 +1055,16 @@ func adviseNodePressure(err error, name string, drv string) {
 		klog.Warning(diskErr)
 		out.WarningT("The node {{.name}} has ran out of disk space.", out.V{"name": name})
 		// generic advice for all drivers
-		out.Step(style.Tip, "Please free up disk or prune images.")
+		out.Styled(style.Tip, "Please free up disk or prune images.")
 		if driver.IsVM(drv) {
-			out.Step(style.Stopped, "Please create a cluster with bigger disk size: `minikube start --disk SIZE_MB` ")
+			out.Styled(style.Stopped, "Please create a cluster with bigger disk size: `minikube start --disk SIZE_MB` ")
 		} else if drv == oci.Docker && runtime.GOOS != "linux" {
-			out.Step(style.Stopped, "Please increse Desktop's disk size.")
+			out.Styled(style.Stopped, "Please increse Desktop's disk size.")
 			if runtime.GOOS == "darwin" {
-				out.Step(style.Documentation, "Documentation: {{.url}}", out.V{"url": "https://docs.docker.com/docker-for-mac/space/"})
+				out.Styled(style.Documentation, "Documentation: {{.url}}", out.V{"url": "https://docs.docker.com/docker-for-mac/space/"})
 			}
 			if runtime.GOOS == "windows" {
-				out.Step(style.Documentation, "Documentation: {{.url}}", out.V{"url": "https://docs.docker.com/docker-for-windows/"})
+				out.Styled(style.Documentation, "Documentation: {{.url}}", out.V{"url": "https://docs.docker.com/docker-for-windows/"})
 			}
 		}
 		out.ErrLn("")
@@ -1071,16 +1075,16 @@ func adviseNodePressure(err error, name string, drv string) {
 		out.ErrLn("")
 		klog.Warning(memErr)
 		out.WarningT("The node {{.name}} has ran out of memory.", out.V{"name": name})
-		out.Step(style.Tip, "Check if you have unnecessary pods running by running 'kubectl get po -A")
+		out.Styled(style.Tip, "Check if you have unnecessary pods running by running 'kubectl get po -A")
 		if driver.IsVM(drv) {
-			out.Step(style.Stopped, "Consider creating a cluster with larger memory size using `minikube start --memory SIZE_MB` ")
+			out.Styled(style.Stopped, "Consider creating a cluster with larger memory size using `minikube start --memory SIZE_MB` ")
 		} else if drv == oci.Docker && runtime.GOOS != "linux" {
-			out.Step(style.Stopped, "Consider increasing Docker Desktop's memory size.")
+			out.Styled(style.Stopped, "Consider increasing Docker Desktop's memory size.")
 			if runtime.GOOS == "darwin" {
-				out.Step(style.Documentation, "Documentation: {{.url}}", out.V{"url": "https://docs.docker.com/docker-for-mac/space/"})
+				out.Styled(style.Documentation, "Documentation: {{.url}}", out.V{"url": "https://docs.docker.com/docker-for-mac/space/"})
 			}
 			if runtime.GOOS == "windows" {
-				out.Step(style.Documentation, "Documentation: {{.url}}", out.V{"url": "https://docs.docker.com/docker-for-windows/"})
+				out.Styled(style.Documentation, "Documentation: {{.url}}", out.V{"url": "https://docs.docker.com/docker-for-windows/"})
 			}
 		}
 		out.ErrLn("")

@@ -24,25 +24,27 @@ import (
 
 const (
 	// Version is the current version of kic
-	Version = "v0.0.17"
+	Version = "v0.0.25"
 	// SHA of the kic base image
-	baseImageSHA = "1cd2e039ec9d418e6380b2fa0280503a72e5b282adea674ee67882f59f4f546e"
+	baseImageSHA = "6f936e3443b95cd918d77623bf7b595653bb382766e280290a02b4a349e88b79"
+	// The name of the GCR kicbase repository
+	gcrRepo = "gcr.io/k8s-minikube/kicbase"
+	// The name of the Dockerhub kicbase repository
+	dockerhubRepo = "kicbase/stable"
 )
 
 var (
 	// BaseImage is the base image is used to spin up kic containers. it uses same base-image as kind.
-	BaseImage = fmt.Sprintf("gcr.io/k8s-minikube/kicbase:%s@sha256:%s", Version, baseImageSHA)
+	BaseImage = fmt.Sprintf("%s:%s@sha256:%s", gcrRepo, Version, baseImageSHA)
 
 	// FallbackImages are backup base images in case gcr isn't available
 	FallbackImages = []string{
 		// the fallback of BaseImage in case gcr.io is not available. stored in docker hub
 		// same image is push to https://github.com/kicbase/stable
-		fmt.Sprintf("kicbase/stable:%s@sha256:%s", Version, baseImageSHA),
-
-		// the fallback of BaseImage in case gcr.io is not available. stored in github packages https://github.com/kubernetes/minikube/packages/206071
-		// github packages docker does _NOT_ support pulling by sha as mentioned in the docs:
-		// https://help.github.com/en/packages/using-github-packages-with-your-projects-ecosystem/configuring-docker-for-use-with-github-packages
-		fmt.Sprintf("docker.pkg.github.com/kubernetes/minikube/kicbase:%s", Version),
+		fmt.Sprintf("%s:%s@sha256:%s", dockerhubRepo, Version, baseImageSHA),
+		// try without sha because #11068
+		fmt.Sprintf("%s:%s", gcrRepo, Version),
+		fmt.Sprintf("%s:%s", dockerhubRepo, Version),
 	}
 )
 
@@ -63,4 +65,5 @@ type Config struct {
 	ContainerRuntime  string            // container runtime kic is running
 	Network           string            //  network to run with kic
 	ExtraArgs         []string          // a list of any extra option to pass to oci binary during creation time, for example --expose 8080...
+	ListenAddress     string            // IP Address to listen to
 }

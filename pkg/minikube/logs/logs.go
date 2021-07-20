@@ -21,6 +21,7 @@ import (
 	"bufio"
 	"bytes"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"regexp"
@@ -29,10 +30,12 @@ import (
 
 	"github.com/pkg/errors"
 	"k8s.io/klog/v2"
+	"k8s.io/minikube/pkg/minikube/audit"
 	"k8s.io/minikube/pkg/minikube/bootstrapper"
 	"k8s.io/minikube/pkg/minikube/command"
 	"k8s.io/minikube/pkg/minikube/config"
 	"k8s.io/minikube/pkg/minikube/cruntime"
+	"k8s.io/minikube/pkg/minikube/localpath"
 	"k8s.io/minikube/pkg/minikube/out"
 	"k8s.io/minikube/pkg/minikube/style"
 )
@@ -91,7 +94,7 @@ type logRunner interface {
 const lookBackwardsCount = 400
 
 // Follow follows logs from multiple files in tail(1) format
-func Follow(r cruntime.Manager, bs bootstrapper.Bootstrapper, cfg config.ClusterConfig, cr logRunner) error {
+func Follow(r cruntime.Manager, bs bootstrapper.Bootstrapper, cfg config.ClusterConfig, cr logRunner, logOutput io.Writer) error {
 	cs := []string{}
 	for _, v := range logCommands(r, bs, cfg, 0, true) {
 		cs = append(cs, v+" &")
@@ -99,8 +102,8 @@ func Follow(r cruntime.Manager, bs bootstrapper.Bootstrapper, cfg config.Cluster
 	cs = append(cs, "wait")
 
 	cmd := exec.Command("/bin/bash", "-c", strings.Join(cs, " "))
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stdout
+	cmd.Stdout = logOutput
+	cmd.Stderr = logOutput
 	if _, err := cr.RunCmd(cmd); err != nil {
 		return errors.Wrapf(err, "log follow")
 	}
@@ -144,20 +147,23 @@ func FindProblems(r cruntime.Manager, bs bootstrapper.Bootstrapper, cfg config.C
 }
 
 // OutputProblems outputs discovered problems.
-func OutputProblems(problems map[string][]string, maxLines int) {
+func OutputProblems(problems map[string][]string, maxLines int, logOutput *os.File) {
+	out.SetErrFile(logOutput)
+	defer out.SetErrFile(os.Stderr)
+
 	for name, lines := range problems {
 		out.FailureT("Problems detected in {{.name}}:", out.V{"name": name})
 		if len(lines) > maxLines {
 			lines = lines[len(lines)-maxLines:]
 		}
 		for _, l := range lines {
-			out.Step(style.LogEntry, l)
+			out.ErrT(style.LogEntry, l)
 		}
 	}
 }
 
 // Output displays logs from multiple sources in tail(1) format
-func Output(r cruntime.Manager, bs bootstrapper.Bootstrapper, cfg config.ClusterConfig, runner command.Runner, lines int) error {
+func Output(r cruntime.Manager, bs bootstrapper.Bootstrapper, cfg config.ClusterConfig, runner command.Runner, lines int, logOutput *os.File) error {
 	cmds := logCommands(r, bs, cfg, lines, false)
 	cmds["kernel"] = "uptime && uname -a && grep PRETTY /etc/os-release"
 
@@ -166,13 +172,16 @@ func Output(r cruntime.Manager, bs bootstrapper.Bootstrapper, cfg config.Cluster
 		names = append(names, k)
 	}
 
+	out.SetOutFile(logOutput)
+	defer out.SetOutFile(os.Stdout)
+
 	sort.Strings(names)
 	failed := []string{}
 	for i, name := range names {
 		if i > 0 {
-			out.Step(style.Empty, "")
+			out.Styled(style.Empty, "")
 		}
-		out.Step(style.Empty, "==> {{.name}} <==", out.V{"name": name})
+		out.Styled(style.Empty, "==> {{.name}} <==", out.V{"name": name})
 		var b bytes.Buffer
 		c := exec.Command("/bin/bash", "-c", cmds[name])
 		c.Stdout = &b
@@ -182,10 +191,12 @@ func Output(r cruntime.Manager, bs bootstrapper.Bootstrapper, cfg config.Cluster
 			failed = append(failed, name)
 			continue
 		}
+		l := ""
 		scanner := bufio.NewScanner(&b)
 		for scanner.Scan() {
-			out.Step(style.Empty, scanner.Text())
+			l += scanner.Text() + "\n"
 		}
+		out.Styled(style.Empty, l)
 	}
 
 	if len(failed) > 0 {
@@ -194,11 +205,64 @@ func Output(r cruntime.Manager, bs bootstrapper.Bootstrapper, cfg config.Cluster
 	return nil
 }
 
+// outputAudit displays the audit logs.
+func outputAudit(lines int) error {
+	out.Styled(style.Empty, "")
+	out.Styled(style.Empty, "==> Audit <==")
+	r, err := audit.Report(lines)
+	if err != nil {
+		return fmt.Errorf("failed to create audit report: %v", err)
+	}
+	out.Styled(style.Empty, r.ASCIITable())
+	return nil
+}
+
+// outputLastStart outputs the last start logs.
+func outputLastStart() error {
+	out.Styled(style.Empty, "")
+	out.Styled(style.Empty, "==> Last Start <==")
+	fp := localpath.LastStartLog()
+	f, err := os.Open(fp)
+	if os.IsNotExist(err) {
+		msg := fmt.Sprintf("Last start log file not found at %s", fp)
+		out.Styled(style.Empty, msg)
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("failed to open file %s: %v", fp, err)
+	}
+	defer f.Close()
+	l := ""
+	s := bufio.NewScanner(f)
+	for s.Scan() {
+		l += s.Text() + "\n"
+	}
+	out.Styled(style.Empty, l)
+	if err := s.Err(); err != nil {
+		return fmt.Errorf("failed to read file %s: %v", fp, err)
+	}
+	return nil
+}
+
+// OutputOffline outputs logs that don't need a running cluster.
+func OutputOffline(lines int, logOutput *os.File) {
+	out.SetOutFile(logOutput)
+	defer out.SetOutFile(os.Stdout)
+	if err := outputAudit(lines); err != nil {
+		klog.Errorf("failed to output audit logs: %v", err)
+	}
+	if err := outputLastStart(); err != nil {
+		klog.Errorf("failed to output last start logs: %v", err)
+	}
+
+	out.Styled(style.Empty, "")
+}
+
 // logCommands returns a list of commands that would be run to receive the anticipated logs
 func logCommands(r cruntime.Manager, bs bootstrapper.Bootstrapper, cfg config.ClusterConfig, length int, follow bool) map[string]string {
 	cmds := bs.LogCommands(cfg, bootstrapper.LogOptions{Lines: length, Follow: follow})
 	for _, pod := range importantPods {
-		ids, err := r.ListContainers(cruntime.ListOptions{Name: pod})
+		ids, err := r.ListContainers(cruntime.ListContainersOptions{Name: pod})
 		if err != nil {
 			klog.Errorf("Failed to list containers for %q: %v", pod, err)
 			continue

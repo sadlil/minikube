@@ -73,6 +73,7 @@ func TestGlobalAvailable(t *testing.T) {
 
 	bar := DriverDef{
 		Name:     "healthy-bar",
+		Default:  true,
 		Priority: Default,
 		Status:   func() State { return State{Healthy: true} },
 	}
@@ -82,6 +83,7 @@ func TestGlobalAvailable(t *testing.T) {
 
 	foo := DriverDef{
 		Name:     "unhealthy-foo",
+		Default:  true,
 		Priority: Default,
 		Status:   func() State { return State{Healthy: false} },
 	}
@@ -91,14 +93,18 @@ func TestGlobalAvailable(t *testing.T) {
 
 	expected := []DriverState{
 		{
-			Name:     "healthy-bar",
-			Priority: Default,
-			State:    State{Healthy: true},
+			Name:       "healthy-bar",
+			Default:    true,
+			Preference: Default,
+			Priority:   Default,
+			State:      State{Healthy: true},
 		},
 		{
-			Name:     "unhealthy-foo",
-			Priority: Unhealthy,
-			State:    State{Healthy: false},
+			Name:       "unhealthy-foo",
+			Default:    true,
+			Preference: Default,
+			Priority:   Unhealthy,
+			State:      State{Healthy: false},
 		},
 	}
 
@@ -117,6 +123,7 @@ func TestGlobalStatus(t *testing.T) {
 	expected := State{Installed: true, Healthy: true}
 	bar := DriverDef{
 		Name:     "bar",
+		Default:  true,
 		Priority: Default,
 		Status:   func() State { return expected },
 	}

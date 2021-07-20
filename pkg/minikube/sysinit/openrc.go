@@ -117,8 +117,32 @@ func (s *OpenRC) Disable(svc string) error {
 	return nil
 }
 
+// DisableNow does Disable + Stop
+func (s *OpenRC) DisableNow(svc string) error {
+	// supposed to do disable + stop
+	// disable does nothing for OpenRC, so just Stop here
+	return s.Stop(svc)
+}
+
+// Mask does nothing
+func (s *OpenRC) Mask(svc string) error {
+	return nil
+}
+
 // Enable does nothing
 func (s *OpenRC) Enable(svc string) error {
+	return nil
+}
+
+// EnableNow does Enable + Start
+func (s *OpenRC) EnableNow(svc string) error {
+	// supposed to do enable + start
+	// enable does nothing for OpenRC, so just Start here
+	return s.Start(svc)
+}
+
+// Unmask does nothing
+func (s *OpenRC) Unmask(svc string) error {
 	return nil
 }
 

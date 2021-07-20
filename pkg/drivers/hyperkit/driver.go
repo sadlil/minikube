@@ -22,7 +22,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io/ioutil"
-	golog "log"
 	"os"
 	"os/user"
 	"path"
@@ -215,9 +214,6 @@ func (d *Driver) createHost() (*hyperkit.HyperKit, error) {
 	h.CPUs = d.CPU
 	h.Memory = d.Memory
 	h.UUID = d.UUID
-	// This should stream logs from hyperkit, but doesn't seem to work.
-	logger := golog.New(os.Stderr, "hyperkit", golog.LstdFlags)
-	h.SetLogger(logger)
 
 	if vsockPorts, err := d.extractVSockPorts(); err != nil {
 		return nil, err
@@ -226,11 +222,11 @@ func (d *Driver) createHost() (*hyperkit.HyperKit, error) {
 		h.VSockPorts = vsockPorts
 	}
 
-	h.Disks = []hyperkit.DiskConfig{
-		{
-			Path:   pkgdrivers.GetDiskPath(d.BaseDriver),
-			Size:   d.DiskSize,
-			Driver: "virtio-blk",
+	h.Disks = []hyperkit.Disk{
+		&hyperkit.RawDisk{
+			Path: pkgdrivers.GetDiskPath(d.BaseDriver),
+			Size: d.DiskSize,
+			Trim: true,
 		},
 	}
 
@@ -263,7 +259,8 @@ func (d *Driver) Start() error {
 	log.Debugf("Generated MAC %s", mac)
 
 	log.Debugf("Starting with cmdline: %s", d.Cmdline)
-	if err := h.Start(d.Cmdline); err != nil {
+	_, err = h.Start(d.Cmdline)
+	if err != nil {
 		return errors.Wrapf(err, "starting with cmd line: %s", d.Cmdline)
 	}
 
@@ -343,13 +340,13 @@ func (t tempError) Error() string {
 	return "Temporary error: " + t.Err.Error()
 }
 
-//recoverFromUncleanShutdown searches for an existing hyperkit.pid file in
-//the machine directory. If it can't find it, a clean shutdown is assumed.
-//If it finds the pid file, it checks for a running hyperkit process with that pid
-//as the existence of a file might not indicate an unclean shutdown but an actual running
-//hyperkit server. This is an error situation - we shouldn't start minikube as there is likely
-//an instance running already. If the PID in the pidfile does not belong to a running hyperkit
-//process, we can safely delete it, and there is a good chance the machine will recover when restarted.
+// recoverFromUncleanShutdown searches for an existing hyperkit.pid file in
+// the machine directory. If it can't find it, a clean shutdown is assumed.
+// If it finds the pid file, it checks for a running hyperkit process with that pid
+// as the existence of a file might not indicate an unclean shutdown but an actual running
+// hyperkit server. This is an error situation - we shouldn't start minikube as there is likely
+// an instance running already. If the PID in the pidfile does not belong to a running hyperkit
+// process, we can safely delete it, and there is a good chance the machine will recover when restarted.
 func (d *Driver) recoverFromUncleanShutdown() error {
 	stateDir := filepath.Join(d.StorePath, "machines", d.MachineName)
 	pidFile := filepath.Join(stateDir, pidFileName)
@@ -526,7 +523,11 @@ func (d *Driver) getPid() int {
 		return 0
 	}
 	dec := json.NewDecoder(f)
-	config := hyperkit.HyperKit{}
+
+	var config struct {
+		Pid int `json:"pid"`
+	}
+
 	if err := dec.Decode(&config); err != nil {
 		log.Warnf("Error decoding pid file: %v", err)
 		return 0

@@ -64,7 +64,7 @@ func init() {
 	stopCmd.Flags().StringVarP(&outputFormat, "output", "o", "text", "Format to print stdout in. Options include: [text,json]")
 
 	if err := viper.GetViper().BindPFlags(stopCmd.Flags()); err != nil {
-		exit.Error(reason.InternalFlagsBind, "unable to bind flags", err)
+		exit.Error(reason.InternalBindFlags, "unable to bind flags", err)
 	}
 }
 
@@ -166,7 +166,7 @@ func stop(api libmachine.API, machineName string) bool {
 
 		switch err := errors.Cause(err).(type) {
 		case mcnerror.ErrHostDoesNotExist:
-			out.Step(style.Meh, `"{{.machineName}}" does not exist, nothing to stop`, out.V{"machineName": machineName})
+			out.Styled(style.Meh, `"{{.machineName}}" does not exist, nothing to stop`, out.V{"machineName": machineName})
 			nonexistent = true
 			return nil
 		default:

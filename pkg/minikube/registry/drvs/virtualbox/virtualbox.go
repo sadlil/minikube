@@ -43,6 +43,7 @@ func init() {
 		Name:     driver.VirtualBox,
 		Config:   configure,
 		Status:   status,
+		Default:  true,
 		Priority: registry.Fallback,
 		Init:     func() drivers.Driver { return virtualbox.NewDriver("", "") },
 	})
@@ -80,7 +81,7 @@ func status() registry.State {
 		}
 	}
 
-	// Allow no more than 2 seconds for querying state
+	// Allow no more than 4 seconds for querying state
 	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
 	defer cancel()
 

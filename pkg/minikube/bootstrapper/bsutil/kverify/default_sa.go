@@ -18,6 +18,7 @@ limitations under the License.
 package kverify
 
 import (
+	"context"
 	"time"
 
 	"github.com/pkg/errors"
@@ -34,9 +35,9 @@ func WaitForDefaultSA(cs *kubernetes.Clientset, timeout time.Duration) error {
 	start := time.Now()
 	saReady := func() (bool, error) {
 		// equivalent to manual check of 'kubectl --context profile get serviceaccount default'
-		sas, err := cs.CoreV1().ServiceAccounts("default").List(meta.ListOptions{})
+		sas, err := cs.CoreV1().ServiceAccounts("default").List(context.Background(), meta.ListOptions{})
 		if err != nil {
-			klog.Infof("temproary error waiting for default SA: %v", err)
+			klog.Infof("temporary error waiting for default SA: %v", err)
 			return false, nil
 		}
 		for _, sa := range sas.Items {

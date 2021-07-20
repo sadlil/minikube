@@ -17,7 +17,6 @@ limitations under the License.
 package addons
 
 import (
-	"k8s.io/minikube/pkg/addons/gcpauth"
 	"k8s.io/minikube/pkg/minikube/config"
 )
 
@@ -42,6 +41,12 @@ var addonPodLabels = map[string]string{
 
 // Addons is a list of all addons
 var Addons = []*Addon{
+	{
+		name:      "auto-pause",
+		set:       SetBool,
+		callbacks: []setFn{EnableOrDisableAddon, enableOrDisableAutoPause},
+	},
+
 	{
 		name:      "dashboard",
 		set:       SetBool,
@@ -107,7 +112,7 @@ var Addons = []*Addon{
 	{
 		name:      "metrics-server",
 		set:       SetBool,
-		callbacks: []setFn{EnableOrDisableAddon},
+		callbacks: []setFn{EnableOrDisableAddon, verifyAddonStatus},
 	},
 	{
 		name:      "nvidia-driver-installer",
@@ -138,8 +143,8 @@ var Addons = []*Addon{
 		name:      "registry-aliases",
 		set:       SetBool,
 		callbacks: []setFn{EnableOrDisableAddon},
-		//TODO - add other settings
-		//TODO check if registry addon is enabled
+		// TODO - add other settings
+		// TODO check if registry addon is enabled
 	},
 	{
 		name:      "storage-provisioner",
@@ -169,7 +174,7 @@ var Addons = []*Addon{
 	{
 		name:      "gcp-auth",
 		set:       SetBool,
-		callbacks: []setFn{gcpauth.EnableOrDisable, EnableOrDisableAddon, verifyGCPAuthAddon},
+		callbacks: []setFn{enableOrDisableGCPAuth, EnableOrDisableAddon, verifyGCPAuthAddon},
 	},
 	{
 		name:      "volumesnapshots",
@@ -181,5 +186,10 @@ var Addons = []*Addon{
 		set:         SetBool,
 		validations: []setFn{IsVolumesnapshotsEnabled},
 		callbacks:   []setFn{EnableOrDisableAddon, verifyAddonStatus},
+	},
+	{
+		name:      "portainer",
+		set:       SetBool,
+		callbacks: []setFn{EnableOrDisableAddon},
 	},
 }

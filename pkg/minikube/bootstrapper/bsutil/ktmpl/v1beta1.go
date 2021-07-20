@@ -90,7 +90,9 @@ staticPodPath: {{.StaticPodPath}}
 apiVersion: kubeproxy.config.k8s.io/v1alpha1
 kind: KubeProxyConfiguration
 clusterCIDR: "{{.PodSubnet }}"
-metricsBindAddress: {{.AdvertiseAddress}}:10249
+metricsBindAddress: 0.0.0.0:10249
+conntrack:
+  maxPerCore: 0
 {{- range $i, $val := printMapInOrder .KubeProxyOptions ": " }}
 {{$val}}
 {{- end}}

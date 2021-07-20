@@ -119,6 +119,7 @@ func TestSuggest(t *testing.T) {
 		{
 			def: registry.DriverDef{
 				Name:     "unhealthy",
+				Default:  true,
 				Priority: registry.Default,
 				Status:   func() registry.State { return registry.State{Installed: true, Healthy: false} },
 			},
@@ -130,6 +131,7 @@ func TestSuggest(t *testing.T) {
 		{
 			def: registry.DriverDef{
 				Name:     "discouraged",
+				Default:  false,
 				Priority: registry.Discouraged,
 				Status:   func() registry.State { return registry.State{Installed: true, Healthy: true} },
 			},
@@ -141,6 +143,7 @@ func TestSuggest(t *testing.T) {
 		{
 			def: registry.DriverDef{
 				Name:     "default",
+				Default:  true,
 				Priority: registry.Default,
 				Status:   func() registry.State { return registry.State{Installed: true, Healthy: true} },
 			},
@@ -152,6 +155,7 @@ func TestSuggest(t *testing.T) {
 		{
 			def: registry.DriverDef{
 				Name:     "preferred",
+				Default:  true,
 				Priority: registry.Preferred,
 				Status:   func() registry.State { return registry.State{Installed: true, Healthy: true} },
 			},
@@ -236,6 +240,22 @@ func TestIndexFromMachineName(t *testing.T) {
 			Name:        "michivious-user",
 			MachineName: "michivious-user-m02-m03",
 			Want:        3},
+		{
+			Name:        "third-node",
+			MachineName: "minikube-m3",
+			Want:        3},
+		{
+			Name:        "agent-node",
+			MachineName: "minikube-m007",
+			Want:        7},
+		{
+			Name:        "byte-0",
+			MachineName: "offline-docker-20210314040449-6655",
+			Want:        1},
+		{
+			Name:        "byte-255",
+			MachineName: "offline-docker-20210314040449-6654",
+			Want:        1},
 	}
 
 	for _, tc := range testCases {
@@ -295,6 +315,70 @@ func TestIndexFromMachineNameClusterConfig(t *testing.T) {
 				},
 			},
 			Want: 2,
+		},
+
+		{
+			ClusterConfig: config.ClusterConfig{Name: "p3",
+				Nodes: []config.Node{
+					{
+						Name:              "",
+						IP:                "172.17.0.3",
+						Port:              8443,
+						KubernetesVersion: "v1.19.2",
+						ControlPlane:      true,
+						Worker:            true,
+					},
+					{
+						Name:              "m02",
+						IP:                "172.17.0.4",
+						Port:              0,
+						KubernetesVersion: "v1.19.2",
+						ControlPlane:      false,
+						Worker:            true,
+					},
+					{
+						Name:              "m03",
+						IP:                "172.17.0.5",
+						Port:              0,
+						KubernetesVersion: "v1.19.2",
+						ControlPlane:      false,
+						Worker:            true,
+					},
+				},
+			},
+			Want: 3,
+		},
+
+		{
+			ClusterConfig: config.ClusterConfig{Name: "offline-docker-20210314040449-6654",
+				Nodes: []config.Node{
+					{
+						Name:              "",
+						IP:                "172.17.0.3",
+						Port:              8443,
+						KubernetesVersion: "v1.19.2",
+						ControlPlane:      true,
+						Worker:            true,
+					},
+				},
+			},
+			Want: 1,
+		},
+
+		{
+			ClusterConfig: config.ClusterConfig{Name: "offline-docker-20210314040449-6655",
+				Nodes: []config.Node{
+					{
+						Name:              "",
+						IP:                "172.17.0.3",
+						Port:              8443,
+						KubernetesVersion: "v1.19.2",
+						ControlPlane:      true,
+						Worker:            true,
+					},
+				},
+			},
+			Want: 1,
 		},
 	}
 
