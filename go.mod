@@ -25,7 +25,7 @@ require (
 	github.com/docker/machine v0.16.2
 	github.com/elazarl/goproxy v0.0.0-20210110162100-a92cc753f88e
 	github.com/golang-collections/collections v0.0.0-20130729185459-604e922904d3
-	github.com/google/go-cmp v0.5.6
+	github.com/google/go-cmp v0.5.7
 	github.com/google/go-containerregistry v0.4.1
 	github.com/google/go-github/v36 v36.0.0
 	github.com/google/slowjam v1.0.0
@@ -75,9 +75,11 @@ require (
 	github.com/xeipuuv/gojsonschema v0.0.0-20180618132009-1d523034197f
 	github.com/zchee/go-vmnet v0.0.0-20161021174912-97ebf9174097
 	go.opencensus.io v0.23.0
-	go.opentelemetry.io/otel v0.17.0
+	go.opentelemetry.io/otel v1.4.0
+	go.opentelemetry.io/otel/internal/metric v0.27.0 // indirect
+	go.opentelemetry.io/otel/oteltest v0.17.0 // indirect
 	go.opentelemetry.io/otel/sdk v0.16.0
-	go.opentelemetry.io/otel/trace v0.17.0
+	go.opentelemetry.io/otel/trace v1.4.0
 	golang.org/x/build v0.0.0-20190927031335-2835ba2e683f
 	golang.org/x/crypto v0.0.0-20210322153248-0c34fe9e7dc2
 	golang.org/x/exp v0.0.0-20210220032938-85be41e4509f
