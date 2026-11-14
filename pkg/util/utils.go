@@ -25,7 +25,6 @@ import (
 
 	"github.com/blang/semver/v4"
 	units "github.com/docker/go-units"
-	"github.com/pkg/errors"
 )
 
 const (
@@ -74,7 +73,7 @@ func GetBinaryDownloadURL(version, platform, arch string) string {
 
 // ChownR does a recursive os.Chown
 func ChownR(path string, uid, gid int) error {
-	return filepath.Walk(path, func(name string, info os.FileInfo, err error) error {
+	return filepath.Walk(path, func(name string, _ os.FileInfo, err error) error {
 		if err == nil {
 			err = os.Chown(name, uid, gid)
 		}
@@ -88,18 +87,18 @@ func MaybeChownDirRecursiveToMinikubeUser(dir string) error {
 		username := os.Getenv("SUDO_USER")
 		usr, err := user.Lookup(username)
 		if err != nil {
-			return errors.Wrap(err, "Error looking up user")
+			return fmt.Errorf("Error looking up user: %w", err)
 		}
 		uid, err := strconv.Atoi(usr.Uid)
 		if err != nil {
-			return errors.Wrapf(err, "Error parsing uid for user: %s", username)
+			return fmt.Errorf("Error parsing uid for user: %s: %w", username, err)
 		}
 		gid, err := strconv.Atoi(usr.Gid)
 		if err != nil {
-			return errors.Wrapf(err, "Error parsing gid for user: %s", username)
+			return fmt.Errorf("Error parsing gid for user: %s: %w", username, err)
 		}
 		if err := ChownR(dir, uid, gid); err != nil {
-			return errors.Wrapf(err, "Error changing ownership for: %s", dir)
+			return fmt.Errorf("Error changing ownership for: %s: %w", dir, err)
 		}
 	}
 	return nil
@@ -108,4 +107,18 @@ func MaybeChownDirRecursiveToMinikubeUser(dir string) error {
 // ParseKubernetesVersion parses the Kubernetes version
 func ParseKubernetesVersion(version string) (semver.Version, error) {
 	return semver.Make(version[1:])
+}
+
+// RemoveDuplicateStrings takes a string slice and returns a slice without duplicates
+func RemoveDuplicateStrings(initial []string) []string {
+	var result []string
+	m := make(map[string]bool, len(initial))
+	for _, v := range initial {
+		if _, ok := m[v]; ok {
+			continue
+		}
+		m[v] = true
+		result = append(result, v)
+	}
+	return result
 }

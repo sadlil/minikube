@@ -1,14 +1,22 @@
-PODMAN_VERSION = v2.2.1
-PODMAN_COMMIT = a0d478edea7f775b7ce32f8eb1a01e75374486cb
+PODMAN_VERSION = v3.4.7
+PODMAN_COMMIT = 74d67f5d43bcd322a4fb11a7b58eced866f9d0b9
 PODMAN_SITE = https://github.com/containers/podman/archive
 PODMAN_SOURCE = $(PODMAN_VERSION).tar.gz
 PODMAN_LICENSE = Apache-2.0
 PODMAN_LICENSE_FILES = LICENSE
 
+PODMAN_BUILDTAGS = exclude_graphdriver_btrfs btrfs_noversion exclude_graphdriver_devicemapper seccomp
+
 PODMAN_DEPENDENCIES = host-go
 ifeq ($(BR2_INIT_SYSTEMD),y)
 # need libsystemd for journal
 PODMAN_DEPENDENCIES += systemd
+PODMAN_BUILDTAGS += systemd
+endif
+
+PODMAN_GOARCH=amd64
+ifeq ($(BR2_aarch64),y)
+PODMAN_GOARCH=arm64
 endif
 
 PODMAN_GOPATH = $(@D)/_output
@@ -16,9 +24,11 @@ PODMAN_BIN_ENV = \
 	$(GO_TARGET_ENV) \
 	CGO_ENABLED=1 \
 	GOPATH="$(PODMAN_GOPATH)" \
-	GOBIN="$(PODMAN_GOPATH)/bin" \
-	PATH=$(PODMAN_GOPATH)/bin:$(BR_PATH)
-
+	PATH=$(PODMAN_GOPATH)/bin:$(BR_PATH) \
+	GOARCH=$(PODMAN_GOARCH) \
+	GOPROXY="https://proxy.golang.org,direct" \
+	GOSUMDB='sum.golang.org'\
+	GOOS=linux
 
 define PODMAN_USERS
 	- -1 podman -1 - - - - -
@@ -42,7 +52,7 @@ endef
 
 define PODMAN_BUILD_CMDS
 	mkdir -p $(@D)/bin
-	$(PODMAN_BIN_ENV) CIRRUS_TAG=$(PODMAN_VERSION) $(MAKE) $(TARGET_CONFIGURE_OPTS) -C $(@D) GIT_COMMIT=$(PODMAN_COMMIT) PREFIX=/usr podman
+	$(PODMAN_BIN_ENV) CIRRUS_TAG=$(PODMAN_VERSION) $(MAKE) $(TARGET_CONFIGURE_OPTS) BUILDFLAGS="-buildvcs=false" BUILDTAGS="$(PODMAN_BUILDTAGS)" -C $(@D) GIT_COMMIT=$(PODMAN_COMMIT) PREFIX=/usr podman
 endef
 
 define PODMAN_INSTALL_TARGET_CMDS

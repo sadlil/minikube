@@ -19,22 +19,28 @@ package vmware
 import (
 	"fmt"
 	"os/exec"
+	"time"
 
-	vmwcfg "github.com/machine-drivers/docker-machine-driver-vmware/pkg/drivers/vmware/config"
+	"k8s.io/minikube/pkg/libmachine/drivers"
+
+	"k8s.io/minikube/pkg/drivers/vmware"
 	"k8s.io/minikube/pkg/minikube/config"
 	"k8s.io/minikube/pkg/minikube/download"
 	"k8s.io/minikube/pkg/minikube/driver"
 	"k8s.io/minikube/pkg/minikube/localpath"
 	"k8s.io/minikube/pkg/minikube/registry"
+	"k8s.io/minikube/pkg/minikube/run"
 )
 
 func init() {
 	err := registry.Register(registry.DriverDef{
-		Name:     driver.VMware,
-		Config:   configure,
-		Default:  true,
-		Priority: registry.Default,
-		Status:   status,
+		Name:         driver.VMware,
+		Config:       configure,
+		Default:      false,
+		Priority:     registry.Deprecated,
+		Init:         func(_ *run.CommandOptions) drivers.Driver { return vmware.NewDriver("", "") },
+		Status:       status,
+		ProbeTimeout: 1 * time.Second,
 	})
 	if err != nil {
 		panic(fmt.Sprintf("unable to register: %v", err))
@@ -42,7 +48,11 @@ func init() {
 }
 
 func configure(cc config.ClusterConfig, n config.Node) (interface{}, error) {
-	d := vmwcfg.NewConfig(config.MachineName(cc, n), localpath.MiniPath())
+	drv := vmware.NewDriver(config.MachineName(cc, n), localpath.MiniPath())
+	d, ok := drv.(*vmware.Driver)
+	if !ok {
+		return nil, fmt.Errorf("unexpected driver type %T", drv)
+	}
 	d.Boot2DockerURL = download.LocalISOResource(cc.MinikubeISO)
 	d.Memory = cc.Memory
 	d.CPU = cc.CPUs
@@ -54,12 +64,8 @@ func configure(cc config.ClusterConfig, n config.Node) (interface{}, error) {
 	return d, nil
 }
 
-func status() registry.State {
-	_, err := exec.LookPath("docker-machine-driver-vmware")
-	if err != nil {
-		return registry.State{Error: err, Fix: "Install docker-machine-driver-vmware", Doc: "https://minikube.sigs.k8s.io/docs/reference/drivers/vmware/"}
-	}
-	_, err = exec.LookPath("vmrun")
+func status(_ *run.CommandOptions) registry.State {
+	_, err := exec.LookPath("vmrun")
 	if err != nil {
 		return registry.State{Error: err, Fix: "Install vmrun", Doc: "https://minikube.sigs.k8s.io/docs/reference/drivers/vmware/"}
 	}

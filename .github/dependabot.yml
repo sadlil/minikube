@@ -5,3 +5,25 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 3
+    groups:
+      k8s-dependencies:
+        patterns:
+          - "k8s.io/*"
+      golang-org:
+        patterns:
+          - "golang.org/*"
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "wednesday"
+    open-pull-requests-limit: 3
+    groups:
+      official-gh-actions:
+        patterns:
+          - "actions/*"
+    ignore:
+      - dependency-name: "vedantmgoyal2009/winget-releaser"

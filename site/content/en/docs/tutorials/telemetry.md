@@ -7,11 +7,11 @@ date: 2020-11-24
 
 ## Overview
 
-minikube provides telemetry suppport via [OpenTelemetry tracing](https://opentelemetry.io/about/) to collect trace data for `minikube start`.
+minikube provides telemetry support via [OpenTelemetry tracing](https://opentelemetry.io/about/) to collect trace data for `minikube start`.
 
 Currently, minikube supports the following exporters for tracing data:
 
-- [Stackdriver](https://github.com/open-telemetry/opentelemetry-collector-contrib/tree/master/exporter/stackdriverexporter)
+- [Stackdriver](https://github.com/GoogleCloudPlatform/k8s-stackdriver)
 
 To collect trace data with minikube and the Stackdriver exporter, run:
 

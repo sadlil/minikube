@@ -17,6 +17,7 @@ limitations under the License.
 package machine
 
 import (
+	"fmt"
 	"net/url"
 	"os"
 	"os/exec"
@@ -25,38 +26,52 @@ import (
 	"runtime"
 	"strings"
 
-	"github.com/docker/machine/libmachine/state"
-	"github.com/pkg/errors"
+	dockerref "github.com/distribution/reference"
+
 	"k8s.io/klog/v2"
+	"k8s.io/minikube/pkg/libmachine/state"
 	"k8s.io/minikube/pkg/minikube/assets"
 	"k8s.io/minikube/pkg/minikube/command"
 	"k8s.io/minikube/pkg/minikube/config"
 	"k8s.io/minikube/pkg/minikube/cruntime"
 	"k8s.io/minikube/pkg/minikube/localpath"
+	"k8s.io/minikube/pkg/minikube/run"
 	"k8s.io/minikube/pkg/minikube/vmpath"
 )
 
 // buildRoot is where images should be built from within the guest VM
 var buildRoot = path.Join(vmpath.GuestPersistentDir, "build")
 
-// BuildImage builds image to all profiles
-func BuildImage(path string, file string, tag string, push bool, env []string, opt []string, profiles []*config.Profile) error {
-	api, err := NewAPIClient()
+// BuildImage builds a container image inside the minikube cluster.
+// By default, the image is built only on the primary control-plane node of each profile (when allNodes is false and nodeName is empty).
+// Behavior can be modified using the following parameters:
+//   - allNodes (bool): If true, builds the image on every node in the cluster.
+//   - nodeName (string): If non-empty, builds the image only on the node whose name or full VM machine name matches nodeName.
+func BuildImage(srcPath string, file string, tag string, push bool, env []string, opt []string, profiles []*config.Profile, allNodes bool, nodeName string, options *run.CommandOptions) error {
+	api, err := NewAPIClient(options)
 	if err != nil {
-		return errors.Wrap(err, "api")
+		return fmt.Errorf("api: %w", err)
 	}
 	defer api.Close()
 
 	succeeded := []string{}
 	failed := []string{}
 
-	u, err := url.Parse(path)
+	u, err := url.Parse(srcPath)
 	if err == nil && u.Scheme == "file" {
-		path = u.Path
+		srcPath = u.Path
 	}
 	remote := err == nil && u.Scheme != ""
-	if runtime.GOOS == "windows" && filepath.VolumeName(path) != "" {
+	if runtime.GOOS == "windows" && filepath.VolumeName(srcPath) != "" {
 		remote = false
+	}
+
+	if tag != "" {
+		named, err := dockerref.ParseNormalizedNamed(tag)
+		if err != nil {
+			return fmt.Errorf("couldn't parse image reference %q: %w", tag, err)
+		}
+		tag = named.String()
 	}
 
 	for _, p := range profiles { // building images to all running profiles
@@ -70,8 +85,17 @@ func BuildImage(path string, file string, tag string, push bool, env []string, o
 			continue
 		}
 
+		cp, err := config.ControlPlane(*p.Config)
+		if err != nil {
+			return err
+		}
+
 		for _, n := range c.Nodes {
 			m := config.MachineName(*c, n)
+
+			if shouldSkipNode(n, cp, m, allNodes, nodeName) {
+				continue
+			}
 
 			status, err := Status(api, m)
 			if err != nil {
@@ -92,9 +116,9 @@ func BuildImage(path string, file string, tag string, push bool, env []string, o
 					return err
 				}
 				if remote {
-					err = buildImage(cr, c.KubernetesConfig, path, file, tag, push, env, opt)
+					err = buildImage(cr, c.KubernetesConfig, srcPath, file, tag, push, env, opt)
 				} else {
-					err = transferAndBuildImage(cr, c.KubernetesConfig, path, file, tag, push, env, opt)
+					err = transferAndBuildImage(cr, c.KubernetesConfig, srcPath, file, tag, push, env, opt)
 				}
 				if err != nil {
 					failed = append(failed, m)
@@ -111,17 +135,29 @@ func BuildImage(path string, file string, tag string, push bool, env []string, o
 	return nil
 }
 
+// shouldSkipNode decides whether to skip building the image on node n based on filtering flags.
+func shouldSkipNode(n config.Node, cp config.Node, machineName string, allNodes bool, nodeName string) bool {
+	if allNodes {
+		return false
+	}
+	if nodeName == "" {
+		return n != cp
+	}
+	// nodeName can match either the user-friendly node name (n.Name) or the full VM machine name (machineName).
+	return nodeName != n.Name && nodeName != machineName
+}
+
 // buildImage builds a single image
 func buildImage(cr command.Runner, k8s config.KubernetesConfig, src string, file string, tag string, push bool, env []string, opt []string) error {
 	r, err := cruntime.New(cruntime.Config{Type: k8s.ContainerRuntime, Runner: cr})
 	if err != nil {
-		return errors.Wrap(err, "runtime")
+		return fmt.Errorf("runtime: %w", err)
 	}
 	klog.Infof("Building image from url: %s", src)
 
 	err = r.BuildImage(src, file, tag, push, env, opt)
 	if err != nil {
-		return errors.Wrapf(err, "%s build %s", r.Name(), src)
+		return fmt.Errorf("%s build %s: %w", r.Name(), src, err)
 	}
 
 	klog.Infof("Built %s from %s", tag, src)
@@ -132,7 +168,7 @@ func buildImage(cr command.Runner, k8s config.KubernetesConfig, src string, file
 func transferAndBuildImage(cr command.Runner, k8s config.KubernetesConfig, src string, file string, tag string, push bool, env []string, opt []string) error {
 	r, err := cruntime.New(cruntime.Config{Type: k8s.ContainerRuntime, Runner: cr})
 	if err != nil {
-		return errors.Wrap(err, "runtime")
+		return fmt.Errorf("runtime: %w", err)
 	}
 	klog.Infof("Building image from path: %s", src)
 
@@ -151,7 +187,7 @@ func transferAndBuildImage(cr command.Runner, k8s config.KubernetesConfig, src s
 	dst := path.Join(buildRoot, filename)
 	f, err := assets.NewFileAsset(src, buildRoot, filename, "0644")
 	if err != nil {
-		return errors.Wrapf(err, "creating copyable file asset: %s", filename)
+		return fmt.Errorf("creating copyable file asset: %s: %w", filename, err)
 	}
 	defer func() {
 		if err := f.Close(); err != nil {
@@ -160,7 +196,7 @@ func transferAndBuildImage(cr command.Runner, k8s config.KubernetesConfig, src s
 	}()
 
 	if err := cr.Copy(f); err != nil {
-		return errors.Wrap(err, "transferring cached image")
+		return fmt.Errorf("transferring cached image: %w", err)
 	}
 
 	context := path.Join(buildRoot, ".", strings.TrimSuffix(filename, filepath.Ext(filename)))
@@ -178,7 +214,7 @@ func transferAndBuildImage(cr command.Runner, k8s config.KubernetesConfig, src s
 	}
 	err = r.BuildImage(context, file, tag, push, env, opt)
 	if err != nil {
-		return errors.Wrapf(err, "%s build %s", r.Name(), dst)
+		return fmt.Errorf("%s build %s: %w", r.Name(), dst, err)
 	}
 
 	args = append([]string{"rm", "-rf"}, context)

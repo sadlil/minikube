@@ -203,7 +203,7 @@ pids_limit = 1024
 # limit is never exceeded.
 log_size_max = -1
 
-# Whether container output should be logged to journald in addition to the kuberentes log file
+# Whether container output should be logged to journald in addition to the kubernetes log file
 log_to_journald = false
 
 # Path to directory in which container exit files are written to by conmon.
@@ -339,7 +339,7 @@ global_auth_file = ""
 
 # The image used to instantiate infra containers.
 # This option supports live configuration reload.
-pause_image = "k8s.gcr.io/pause:3.2"
+pause_image = "registry.k8s.io/pause:3.2"
 
 # The path to a file containing credentials specific for pulling the pause_image from
 # above. The file is similar to that of /var/lib/kubelet/config.json

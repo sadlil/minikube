@@ -17,9 +17,9 @@ limitations under the License.
 package tests
 
 import (
-	"fmt"
+	"errors"
 
-	"github.com/docker/machine/libmachine/drivers"
+	"k8s.io/minikube/pkg/libmachine/drivers"
 )
 
 // MockHost used for testing. When commands are run, the output from CommandOutput
@@ -49,7 +49,7 @@ func (m MockHost) RunSSHCommand(cmd string) (string, error) {
 		return output, nil
 	}
 	if m.Error != "" {
-		return "", fmt.Errorf(m.Error)
+		return "", errors.New(m.Error)
 	}
 	return "", nil
 }

@@ -16,7 +16,12 @@ limitations under the License.
 
 package addons
 
-import "testing"
+import (
+	"testing"
+
+	"k8s.io/minikube/pkg/minikube/config"
+	"k8s.io/minikube/pkg/minikube/run"
+)
 
 func TestIsAddonValid(t *testing.T) {
 	tests := []struct {
@@ -44,35 +49,24 @@ func TestIsAddonValid(t *testing.T) {
 	}
 }
 
-func TestContains(t *testing.T) {
+func TestIsKVMDriverForNVIDIA(t *testing.T) {
 	tests := []struct {
-		slice    []string
-		str      string
-		expected bool
+		cc        *config.ClusterConfig
+		wantError bool
 	}{
 		{
-			slice:    []string{},
-			str:      "test",
-			expected: false,
+			cc: &config.ClusterConfig{Driver: "kvm"},
 		},
 		{
-			slice:    []string{"test", "test1"},
-			str:      "test1",
-			expected: true,
-		},
-		{
-			slice:    []string{"test", "test1"},
-			str:      "test2",
-			expected: false,
+			cc:        &config.ClusterConfig{Driver: "docker"},
+			wantError: true,
 		},
 	}
 
-	for _, test := range tests {
-		t.Run(test.str, func(t *testing.T) {
-			actual := contains(test.slice, test.str)
-			if test.expected != actual {
-				t.Fatalf("slice: %v\nstr: %v\nexpected: %v\nactual:%v\n", test.slice, test.str, test.expected, actual)
-			}
-		})
+	for _, tc := range tests {
+		err := isKVMDriverForNVIDIA(tc.cc, "", "", &run.CommandOptions{})
+		if gotError := (err != nil); gotError != tc.wantError {
+			t.Errorf("isKVMDriverForNVIDIA(%v) got error %t (%v), want error %t", tc.cc, gotError, err, tc.wantError)
+		}
 	}
 }

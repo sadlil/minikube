@@ -1,4 +1,4 @@
-// +build integration
+//go:build integration
 
 /*
 Copyright 2020 The Kubernetes Authors All rights reserved.
@@ -25,7 +25,7 @@ import (
 	"strings"
 	"testing"
 
-	"k8s.io/minikube/cmd/minikube/cmd"
+	"k8s.io/minikube/pkg/minikube/cluster"
 )
 
 // TestPause tests minikube pause functionality
@@ -58,6 +58,9 @@ func TestPause(t *testing.T) {
 			if ctx.Err() == context.DeadlineExceeded {
 				t.Fatalf("Unable to run more tests (deadline exceeded)")
 			}
+			if t.Failed() {
+				t.Fatalf("Previous test failed, not running dependent tests")
+			}
 
 			t.Run(tc.name, func(t *testing.T) {
 				tc.validator(ctx, t, profile)
@@ -73,7 +76,7 @@ func TestPause(t *testing.T) {
 func validateFreshStart(ctx context.Context, t *testing.T, profile string) {
 	defer PostMortemLogs(t, profile)
 
-	args := append([]string{"start", "-p", profile, "--memory=2048", "--install-addons=false", "--wait=all"}, StartArgs()...)
+	args := append([]string{"start", "-p", profile, "--memory=3072", "--install-addons=false", "--wait=all"}, StartArgs()...)
 	rr, err := Run(t, exec.CommandContext(ctx, Target(), args...))
 	if err != nil {
 		t.Fatalf("failed to start minikube with args: %q : %v", rr.Command(), err)
@@ -83,6 +86,9 @@ func validateFreshStart(ctx context.Context, t *testing.T, profile string) {
 // validateStartNoReconfigure validates that starting a running cluster does not invoke reconfiguration
 func validateStartNoReconfigure(ctx context.Context, t *testing.T, profile string) {
 	defer PostMortemLogs(t, profile)
+	if KVMDriver() {
+		t.Skip("skipping: flaky on KVM driver: https://github.com/kubernetes/minikube/issues/23141")
+	}
 
 	args := []string{"start", "-p", profile, "--alsologtostderr", "-v=1"}
 	args = append(args, StartArgs()...)
@@ -172,6 +178,13 @@ func validateVerifyDeleted(ctx context.Context, t *testing.T, profile string) {
 			t.Errorf("expected to see error and volume %q to not exist after deletion but got no error and this output: %s", rr.Command(), rr.Output())
 		}
 
+		rr, err = Run(t, exec.CommandContext(ctx, bin, "network", "ls"))
+		if err != nil {
+			t.Errorf("failed to get list of networks: %v", err)
+		}
+		if strings.Contains(rr.Output(), profile) {
+			t.Errorf("expected network %q to not exist after deletion but contained: %s", profile, rr.Output())
+		}
 	}
 
 }
@@ -181,12 +194,12 @@ func validateStatus(ctx context.Context, t *testing.T, profile string) {
 	defer PostMortemLogs(t, profile)
 
 	statusOutput := runStatusCmd(ctx, t, profile, false)
-	var cs cmd.ClusterState
+	var cs cluster.State
 	if err := json.Unmarshal(statusOutput, &cs); err != nil {
 		t.Fatalf("unmarshalling: %v", err)
 	}
 	// verify the status looks as we expect
-	if cs.StatusCode != cmd.Paused {
+	if cs.StatusCode != cluster.Paused {
 		t.Fatalf("incorrect status code: %v", cs.StatusCode)
 	}
 	if cs.StatusName != "Paused" {

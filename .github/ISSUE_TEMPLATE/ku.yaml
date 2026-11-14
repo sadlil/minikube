@@ -1,0 +1,53 @@
+name: Kurdî (Kurmanji)
+description: Raportkirina pirsgirêkekê
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Çi bû?
+      description: |
+        Rêwîtiya bikar: Ji bo ku zêdetir log bistînin, flag "--alsologtostderr" li ser rêza fermana xwe zêde bikin.
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Pelê logê bikeve
+      description: |
+        Rêwîtiya bikar: Run `minikube logs --file=log.txt` û paşê pelê `log.txt` ji browser ve drag & drop bikin.
+    validations:
+      required: true
+  - type: dropdown
+    id: operating-system
+    attributes:
+      label: Pergala Operasyonê
+      description: Pergala Operasyonê te çi ye?
+      options:
+        - macOS (Default)
+        - Windows
+        - Ubuntu
+        - Redhat/Fedora
+        - Other
+    validations:
+      required: false
+  - type: dropdown
+    id: driver
+    attributes:
+      label: Driver
+      description: Hûn çi driverê têkiliyê dikin?
+      options:
+        - N/A
+        - Docker
+        - Podman
+        - Hyper-V
+        - KVM2
+        - VirtualBox
+        - None (Baremetal)
+        - SSH
+        - VMware
+        - Parallels
+        - QEMU
+        - vfkit
+        - krunkit
+    validations:
+      required: false

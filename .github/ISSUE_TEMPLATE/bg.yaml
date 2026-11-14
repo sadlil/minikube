@@ -1,0 +1,53 @@
+name: Български
+description: Докладвай проблем
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Какво се случи?
+      description: |
+        Съвет: Добавете флага "--alsologtostderr" към командния ред за повече логове.
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Прикачи лог файл
+      description: |
+        Съвет: Стартирайте `minikube logs --file=log.txt`, след това плъзнете и пуснете файла `log.txt` в браузъра.
+    validations:
+      required: true
+  - type: dropdown
+    id: operating-system
+    attributes:
+      label: Операционна система
+      description: Каква е вашата ОС?
+      options:
+        - macOS (Default)
+        - Windows
+        - Ubuntu
+        - Redhat/Fedora
+        - Other
+    validations:
+      required: false
+  - type: dropdown
+    id: driver
+    attributes:
+      label: Driver
+      description: Кой драйвър използвате?
+      options:
+        - N/A
+        - Docker
+        - Podman
+        - Hyper-V
+        - KVM2
+        - VirtualBox
+        - None (Baremetal)
+        - SSH
+        - VMware
+        - Parallels
+        - QEMU
+        - vfkit
+        - krunkit
+    validations:
+      required: false

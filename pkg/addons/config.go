@@ -18,14 +18,15 @@ package addons
 
 import (
 	"k8s.io/minikube/pkg/minikube/config"
+	"k8s.io/minikube/pkg/minikube/run"
 )
 
-type setFn func(*config.ClusterConfig, string, string) error
+type setFn func(*config.ClusterConfig, string, string, *run.CommandOptions) error
 
 // Addon represents an addon
 type Addon struct {
 	name        string
-	set         func(*config.ClusterConfig, string, string) error
+	set         func(*config.ClusterConfig, string, string, *run.CommandOptions) error
 	validations []setFn
 	callbacks   []setFn
 }
@@ -37,6 +38,7 @@ var addonPodLabels = map[string]string{
 	"gvisor":              "kubernetes.io/minikube-addons=gvisor",
 	"gcp-auth":            "kubernetes.io/minikube-addons=gcp-auth",
 	"csi-hostpath-driver": "kubernetes.io/minikube-addons=csi-hostpath-driver",
+	"traefik":             "app.kubernetes.io/name=traefik",
 }
 
 // Addons is a list of all addons
@@ -71,13 +73,8 @@ var Addons = []*Addon{
 	{
 		name:        "gvisor",
 		set:         SetBool,
-		validations: []setFn{IsRuntimeContainerd},
+		validations: []setFn{isRuntimeContainerd},
 		callbacks:   []setFn{EnableOrDisableAddon, verifyAddonStatus},
-	},
-	{
-		name:      "helm-tiller",
-		set:       SetBool,
-		callbacks: []setFn{EnableOrDisableAddon},
 	},
 	{
 		name:      "ingress",
@@ -100,6 +97,21 @@ var Addons = []*Addon{
 		callbacks: []setFn{EnableOrDisableAddon},
 	},
 	{
+		name:      "inspektor-gadget",
+		set:       SetBool,
+		callbacks: []setFn{EnableOrDisableAddon},
+	},
+	{
+		name:      "kong",
+		set:       SetBool,
+		callbacks: []setFn{EnableOrDisableAddon},
+	},
+	{
+		name:      "kubetail",
+		set:       SetBool,
+		callbacks: []setFn{EnableOrDisableAddon},
+	},
+	{
 		name:      "kubevirt",
 		set:       SetBool,
 		callbacks: []setFn{EnableOrDisableAddon},
@@ -115,12 +127,20 @@ var Addons = []*Addon{
 		callbacks: []setFn{EnableOrDisableAddon, verifyAddonStatus},
 	},
 	{
-		name:      "nvidia-driver-installer",
-		set:       SetBool,
-		callbacks: []setFn{EnableOrDisableAddon},
+		name:        "nvidia-driver-installer",
+		set:         SetBool,
+		validations: []setFn{isKVMDriverForNVIDIA},
+		callbacks:   []setFn{EnableOrDisableAddon},
 	},
 	{
-		name:      "nvidia-gpu-device-plugin",
+		// The nvidia-gpu-device-plugin addon is deprecated and it's functionality is merged inside of nvidia-device-plugin addon.
+		name:        "nvidia-gpu-device-plugin",
+		set:         SetBool,
+		validations: []setFn{isKVMDriverForNVIDIA},
+		callbacks:   []setFn{EnableOrDisableAddon},
+	},
+	{
+		name:      "amd-gpu-device-plugin",
 		set:       SetBool,
 		callbacks: []setFn{EnableOrDisableAddon},
 	},
@@ -152,7 +172,7 @@ var Addons = []*Addon{
 		callbacks: []setFn{EnableOrDisableAddon},
 	},
 	{
-		name:      "storage-provisioner-gluster",
+		name:      "storage-provisioner-rancher",
 		set:       SetBool,
 		callbacks: []setFn{enableOrDisableStorageClasses},
 	},
@@ -177,6 +197,11 @@ var Addons = []*Addon{
 		callbacks: []setFn{enableOrDisableGCPAuth, EnableOrDisableAddon, verifyGCPAuthAddon},
 	},
 	{
+		name:      "volcano",
+		set:       SetBool,
+		callbacks: []setFn{EnableOrDisableAddon},
+	},
+	{
 		name:      "volumesnapshots",
 		set:       SetBool,
 		callbacks: []setFn{EnableOrDisableAddon},
@@ -184,12 +209,47 @@ var Addons = []*Addon{
 	{
 		name:        "csi-hostpath-driver",
 		set:         SetBool,
-		validations: []setFn{IsVolumesnapshotsEnabled},
+		validations: []setFn{isVolumesnapshotsEnabled},
 		callbacks:   []setFn{EnableOrDisableAddon, verifyAddonStatus},
 	},
 	{
 		name:      "portainer",
 		set:       SetBool,
 		callbacks: []setFn{EnableOrDisableAddon},
+	},
+	{
+		name:      "inaccel",
+		set:       SetBool,
+		callbacks: []setFn{EnableOrDisableAddon},
+	},
+	{
+		name:      "headlamp",
+		set:       SetBool,
+		callbacks: []setFn{EnableOrDisableAddon},
+	},
+	{
+		name:      "cloud-spanner",
+		set:       SetBool,
+		callbacks: []setFn{EnableOrDisableAddon},
+	},
+	{
+		name:      "kubeflow",
+		set:       SetBool,
+		callbacks: []setFn{EnableOrDisableAddon},
+	},
+	{
+		name:      "nvidia-device-plugin",
+		set:       SetBool,
+		callbacks: []setFn{EnableOrDisableAddon},
+	},
+	{
+		name:      "yakd",
+		set:       SetBool,
+		callbacks: []setFn{EnableOrDisableAddon},
+	},
+	{
+		name:      "traefik",
+		set:       SetBool,
+		callbacks: []setFn{EnableOrDisableAddon, verifyAddonStatus},
 	},
 }

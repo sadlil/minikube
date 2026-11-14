@@ -17,19 +17,12 @@ limitations under the License.
 package util
 
 import (
+	"fmt"
 	"net"
-
-	"github.com/pkg/errors"
 )
 
-// These constants are used by both minikube
-const (
-	APIServerPort    = 8443
-	DefaultDNSDomain = "cluster.local"
-)
-
-// DefaultV114AdmissionControllers are admission controllers we default to in v1.14.x
-var DefaultV114AdmissionControllers = []string{
+// DefaultAdmissionControllers are admission controllers we default to
+var DefaultAdmissionControllers = []string{
 	"NamespaceLifecycle",
 	"LimitRanger",
 	"ServiceAccount",
@@ -41,32 +34,29 @@ var DefaultV114AdmissionControllers = []string{
 	"ResourceQuota",
 }
 
-// DefaultLegacyAdmissionControllers are admission controllers we include with Kubernetes <1.14.0
-var DefaultLegacyAdmissionControllers = append([]string{"Initializers"}, DefaultV114AdmissionControllers...)
-
-// GetServiceClusterIP returns the first IP of the ServiceCIDR
-func GetServiceClusterIP(serviceCIDR string) (net.IP, error) {
+// ServiceClusterIP returns the first IP of the ServiceCIDR
+func ServiceClusterIP(serviceCIDR string) (net.IP, error) {
 	ip, _, err := net.ParseCIDR(serviceCIDR)
 	if err != nil {
-		return nil, errors.Wrap(err, "parsing default service cidr")
+		return nil, fmt.Errorf("parsing default service cidr: %w", err)
 	}
 	ip = ip.To4()
 	ip[3]++
 	return ip, nil
 }
 
-// GetDNSIP returns x.x.x.10 of the service CIDR
-func GetDNSIP(serviceCIDR string) (net.IP, error) {
+// DNSIP returns x.x.x.10 of the service CIDR
+func DNSIP(serviceCIDR string) (net.IP, error) {
 	ip, _, err := net.ParseCIDR(serviceCIDR)
 	if err != nil {
-		return nil, errors.Wrap(err, "parsing default service cidr")
+		return nil, fmt.Errorf("parsing default service cidr: %w", err)
 	}
 	ip = ip.To4()
 	ip[3] = 10
 	return ip, nil
 }
 
-// GetAlternateDNS returns a list of alternate names for a domain
-func GetAlternateDNS(domain string) []string {
+// AlternateDNS returns a list of alternate names for a domain
+func AlternateDNS(domain string) []string {
 	return []string{"kubernetes.default.svc." + domain, "kubernetes.default.svc", "kubernetes.default", "kubernetes", "localhost"}
 }

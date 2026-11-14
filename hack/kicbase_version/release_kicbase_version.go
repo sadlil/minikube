@@ -46,7 +46,6 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"os"
 	"os/exec"
 	"regexp"
@@ -55,7 +54,7 @@ import (
 
 	"k8s.io/klog/v2"
 
-	"github.com/pkg/errors"
+	"errors"
 )
 
 const (
@@ -94,7 +93,7 @@ var (
 		var out bytes.Buffer
 		cmd.Stderr = &out
 		if err := cmd.Run(); err != nil {
-			return errors.Errorf("%s: %s", err.Error(), out.String())
+			return fmt.Errorf("%s: %s", err.Error(), out.String())
 		}
 		return nil
 	}
@@ -206,7 +205,7 @@ func prepareImage(ctx context.Context, current, release string) (image string, e
 		}
 	}
 	if image == "" {
-		return "", errors.Errorf("cannot find current image version tag %s locally nor in any registry", current)
+		return "", fmt.Errorf("cannot find current image version tag %s locally nor in any registry", current)
 	}
 	// tag current image with release version
 	tag := exec.CommandContext(ctx, "docker", "tag", image+":"+current, image+":"+release)
@@ -218,7 +217,7 @@ func prepareImage(ctx context.Context, current, release string) (image string, e
 
 // getKICVersion returns current kic base image version and any error
 func getKICVersion() (string, error) {
-	blob, err := ioutil.ReadFile(kicFile)
+	blob, err := os.ReadFile(kicFile)
 	if err != nil {
 		return "", err
 	}

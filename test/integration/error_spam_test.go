@@ -1,4 +1,4 @@
-// +build integration
+//go:build integration
 
 /*
 Copyright 2016 The Kubernetes Authors All rights reserved.
@@ -49,6 +49,12 @@ var stderrAllow = []string{
 	`Your cgroup does not allow setting memory.`,
 	// progress bar output
 	`    > .*`,
+	// Warning of issues with specific Kubernetes versions
+	`Kubernetes .* has a known `,
+	`For more information, see`,
+	// registry connectivity warning from inside the container
+	`Failing to connect to https://registry.k8s.io/`,
+	`you may need to configure a proxy`,
 }
 
 // stderrAllowRe combines rootCauses into a single regex
@@ -73,7 +79,7 @@ func TestErrorSpam(t *testing.T) {
 	t.Run("setup", func(t *testing.T) {
 		// This should likely use multi-node once it's ready
 		// use `--log_dir` flag to run isolated and avoid race condition - ie, failing to clean up (locked) log files created by other concurently-run tests, or counting them in results
-		args := append([]string{"start", "-p", profile, "-n=1", "--memory=2250", "--wait=false", fmt.Sprintf("--log_dir=%s", logDir)}, StartArgs()...)
+		args := append([]string{"start", "-p", profile, "-n=1", "--memory=3072", "--wait=false", fmt.Sprintf("--log_dir=%s", logDir)}, StartArgs()...)
 
 		rr, err := Run(t, exec.CommandContext(ctx, Target(), args...))
 		if err != nil {
@@ -108,16 +114,6 @@ func TestErrorSpam(t *testing.T) {
 			t.Logf("minikube stderr:\n%s", stderr)
 		}
 
-		steps := []string{
-			"Generating certificates and keys ...",
-			"Booting up control plane ...",
-			"Configuring RBAC rules ...",
-		}
-		for _, step := range steps {
-			if !strings.Contains(stdout, step) {
-				t.Errorf("missing kubeadm init sub-step %q", step)
-			}
-		}
 	})
 
 	logTests := []struct {

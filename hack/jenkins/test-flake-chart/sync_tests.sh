@@ -20,7 +20,7 @@
 # flakes or uploads flakes to flake data.
 # 
 # This script expects the following env variables:
-# MINIKUBE_LOCATION: The Github location being run on (e.g. master, 11000).
+# MINIKUBE_LOCATION: The GitHub location being run on (e.g. master, 11000).
 # COMMIT: Commit hash the tests ran on.
 # ROOT_JOB_ID: Job ID to use for synchronization.
 
@@ -62,7 +62,7 @@ FINISHED_COUNT=$(\
   | wc -l)
 
 if [ ${STARTED_COUNT} -ne ${FINISHED_COUNT} ]; then
-  echo "Started environments are not all finished! Started: ${STARTED_LIST}, Finished: $(cat ${FINISHED_LIST}))"
+  echo "Started environments are not all finished! Started: ${STARTED_LIST}, Finished: $(cat ${FINISHED_LIST})"
   exit 0
 fi
 
@@ -83,8 +83,13 @@ if [[ "${MINIKUBE_LOCATION}" == "master" ]]; then
     SUMMARY="${BUCKET_PATH}/${ENVIRONMENT}_summary.json"
     "${DIR}/upload_tests.sh" "${SUMMARY}" || true
   done
+  "${DIR}/process_last_90/process_last_90.sh"
 else
-  "${DIR}/report_flakes.sh" "${MINIKUBE_LOCATION}" "${ROOT_JOB_ID}" "${FINISHED_LIST}"
+  TMP_COMMENT=$(mktemp)
+  (cd "${DIR}/report_flakes" && go run . "${MINIKUBE_LOCATION}" "${ROOT_JOB_ID}" "${FINISHED_LIST}")  > "$TMP_COMMENT"
+  # install gh if not present
+  "$DIR/../installers/check_install_gh.sh"
+  gh pr comment "https://github.com/kubernetes/minikube/pull/$MINIKUBE_LOCATION" --body "$(cat $TMP_COMMENT)"
 fi
 
 gsutil rm "${BUCKET_PATH}/finished_environments.txt"

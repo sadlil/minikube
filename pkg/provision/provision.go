@@ -23,19 +23,19 @@ import (
 	"os/exec"
 	"path"
 	"path/filepath"
+	"slices"
 	"strings"
 	"text/template"
 	"time"
 
-	"github.com/docker/machine/libmachine/auth"
-	"github.com/docker/machine/libmachine/cert"
-	"github.com/docker/machine/libmachine/drivers"
-	"github.com/docker/machine/libmachine/engine"
-	"github.com/docker/machine/libmachine/mcnutils"
-	"github.com/docker/machine/libmachine/provision"
-	"github.com/docker/machine/libmachine/swarm"
-	"github.com/pkg/errors"
 	"k8s.io/klog/v2"
+	"k8s.io/minikube/pkg/libmachine/auth"
+	"k8s.io/minikube/pkg/libmachine/cert"
+	"k8s.io/minikube/pkg/libmachine/drivers"
+	"k8s.io/minikube/pkg/libmachine/engine"
+	"k8s.io/minikube/pkg/libmachine/mcnutils"
+	"k8s.io/minikube/pkg/libmachine/provision"
+	"k8s.io/minikube/pkg/libmachine/swarm"
 
 	"k8s.io/minikube/pkg/minikube/assets"
 	"k8s.io/minikube/pkg/minikube/command"
@@ -83,7 +83,7 @@ func configureAuth(p miniProvisioner) error {
 	klog.Infof("configureAuth start")
 	start := time.Now()
 	defer func() {
-		klog.Infof("duration metric: configureAuth took %s", time.Since(start))
+		klog.Infof("duration metric: took %s to configureAuth", time.Since(start))
 	}()
 
 	driver := p.GetDriver()
@@ -94,20 +94,25 @@ func configureAuth(p miniProvisioner) error {
 
 	ip, err := driver.GetIP()
 	if err != nil {
-		return errors.Wrap(err, "error getting ip during provisioning")
+		return fmt.Errorf("error getting ip during provisioning: %w", err)
 	}
 
 	hostIP, err := driver.GetSSHHostname()
 	if err != nil {
-		return errors.Wrap(err, "error getting ssh hostname during provisioning")
+		return fmt.Errorf("error getting ssh hostname during provisioning: %w", err)
 	}
 
 	if err := copyHostCerts(authOptions); err != nil {
 		return err
 	}
 
+	hosts := authOptions.ServerCertSANs
 	// The Host IP is always added to the certificate's SANs list
-	hosts := append(authOptions.ServerCertSANs, ip, hostIP, "localhost", "127.0.0.1", "minikube", machineName)
+	hosts = append(hosts, ip, hostIP, "localhost", "127.0.0.1", "minikube", machineName)
+	// eliminate duplicates in 'hosts'
+	slices.Sort(hosts)
+	hosts = slices.Compact(hosts)
+
 	klog.Infof("generating server cert: %s ca-key=%s private-key=%s org=%s san=%s",
 		authOptions.ServerCertPath,
 		authOptions.CaCertPath,
@@ -151,7 +156,7 @@ func copyHostCerts(authOptions auth.Options) error {
 	for src, dst := range hostCerts {
 		f, err := assets.NewFileAsset(src, path.Dir(dst), filepath.Base(dst), "0777")
 		if err != nil {
-			return errors.Wrapf(err, "open cert file: %s", src)
+			return fmt.Errorf("open cert file: %s: %w", src, err)
 		}
 		defer func() {
 			if err := f.Close(); err != nil {
@@ -160,7 +165,7 @@ func copyHostCerts(authOptions auth.Options) error {
 		}()
 
 		if err := execRunner.Copy(f); err != nil {
-			return errors.Wrapf(err, "transferring file: %+v", f)
+			return fmt.Errorf("transferring file: %+v: %w", f, err)
 		}
 	}
 
@@ -191,7 +196,7 @@ func copyRemoteCerts(authOptions auth.Options, driver drivers.Driver) error {
 	for src, dst := range remoteCerts {
 		f, err := assets.NewFileAsset(src, path.Dir(dst), filepath.Base(dst), "0640")
 		if err != nil {
-			return errors.Wrapf(err, "error copying %s to %s", src, dst)
+			return fmt.Errorf("error copying %s to %s: %w", src, dst, err)
 		}
 		defer func() {
 			if err := f.Close(); err != nil {
@@ -200,7 +205,7 @@ func copyRemoteCerts(authOptions auth.Options, driver drivers.Driver) error {
 		}()
 
 		if err := sshRunner.Copy(f); err != nil {
-			return errors.Wrapf(err, "transferring file to machine %v", f)
+			return fmt.Errorf("transferring file to machine %v: %w", f, err)
 		}
 	}
 
@@ -223,7 +228,7 @@ func setRemoteAuthOptions(p provision.Provisioner) auth.Options {
 func setContainerRuntimeOptions(name string, p miniProvisioner) error {
 	c, err := config.Load(name)
 	if err != nil {
-		return errors.Wrap(err, "getting cluster config")
+		return fmt.Errorf("getting cluster config: %w", err)
 	}
 
 	switch c.KubernetesConfig.ContainerRuntime {
@@ -232,6 +237,8 @@ func setContainerRuntimeOptions(name string, p miniProvisioner) error {
 	case "containerd":
 		return nil
 	default:
+		// docker, including "" (pre-2022 stored empty flag, same as
+		// cruntime.New). Unknown names also get docker options.
 		_, err := p.GenerateDockerOptions(engine.DefaultPort)
 		return err
 	}

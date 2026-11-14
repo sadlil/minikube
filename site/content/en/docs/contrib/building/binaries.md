@@ -7,15 +7,11 @@ weight: 2
 
 ## Prerequisites
 
-* A recent Go distribution (>=1.16)
-* If you are on Windows, you'll need Docker to be installed.
+* A recent Go distribution (>=1.22.0)
+* If you are on Windows, you'll need to have installed
+  * Docker
+  * GNU Make e.g. `winget install GnuWin32.make`, then add `C:\Program Files (x86)\GnuWin32\bin` to `PATH`
 * 4GB of RAM
-
-Additionally, if you are on Fedora, you will need to install `glibc-static`:
-
-```shell
-sudo dnf install -y glibc-static
-```
 
 ## Downloading the source
 
@@ -37,9 +33,23 @@ You can also build platform specific executables like below:
     2. `make linux` will build the binary for Linux platform
     3. `make darwin` will build the binary for Darwin/Mac platform
 
-## Compiling minikube using Docker
+## Build minikube
 
-To cross-compile to/from different operating systems:
+To build and compile minikube on your machine simply run
+```shell
+make
+```
+and minikube binary will be available in ./out/minikube
+
+## build minikube in docker
+
+if you have issues running make due to tooling issue you can run the make in "docker"
+```shell
+MINIKUBE_BUILD_IN_DOCKER=y make
+```
+
+## build binaries for other platforms
+if you wanted to build binaries for all platforms -linux,darwin,windows (cross-compile) to/from different operating systems:
 
 ```shell
 MINIKUBE_BUILD_IN_DOCKER=y make cross
@@ -54,6 +64,45 @@ Start the cluster using your built minikube with:
 ```shell
 ./out/minikube start
 ```
+
+## Unit Test
+```shell
+make test
+```
+
+## Lint
+```shell
+make lint
+```
+
+## clean and go mod tidy
+```shell
+make clean
+make gomodtidy
+```
+
+## Run Short integration test (functional test)
+```shell
+make functional
+```
+
+To see HTML report of the functional test you can install [gopogh](https://github.com/medyagh/gopogh)
+and run 
+```shell
+make html_report
+```
+This will produce an html report in `./out/` folder
+
+### learn more about other make targets
+```shell
+make help
+```
+
+## Testing
+
+See the [Testing Guide](../testing.en.md) for information on testing minikube.
+
+
 
 ## Building the ISO
 

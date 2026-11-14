@@ -121,6 +121,9 @@ Function .onInit
 FunctionEnd
 
 Section "Install"
+	# Required to create a system-wide Start Menu shortcut 
+	SetShellVarContext all
+
 	# Files for the install directory - to build the installer, these should be in the same directory as the install script (this file)
 	SetOutPath $INSTDIR
 	# Files added here should be removed by the uninstaller (see section "uninstall")
@@ -142,11 +145,11 @@ Section "Install"
 	WriteRegStr HKLM "${UNINSTALLDIR}" "QuietUninstallString" "$\"$INSTDIR\uninstall.exe$\" /S"
 	WriteRegStr HKLM "${UNINSTALLDIR}" "InstallLocation" "$\"$INSTDIR$\""
 	WriteRegStr HKLM "${UNINSTALLDIR}" "DisplayIcon" "$\"$INSTDIR\logo.ico$\""
-	WriteRegStr HKLM "${UNINSTALLDIR}" "Publisher" "$\"${COMPANYNAME}$\""
-	WriteRegStr HKLM "${UNINSTALLDIR}" "HelpLink" "$\"${HELPURL}$\""
-	WriteRegStr HKLM "${UNINSTALLDIR}" "URLUpdateInfo" "$\"${UPDATEURL}$\""
-	WriteRegStr HKLM "${UNINSTALLDIR}" "URLInfoAbout" "$\"${ABOUTURL}$\""
-	WriteRegStr HKLM "${UNINSTALLDIR}" "DisplayVersion" "$\"${VERSIONMAJOR}.${VERSIONMINOR}.${VERSIONBUILD}$\""
+	WriteRegStr HKLM "${UNINSTALLDIR}" "Publisher" "${COMPANYNAME}"
+	WriteRegStr HKLM "${UNINSTALLDIR}" "HelpLink" "${HELPURL}"
+	WriteRegStr HKLM "${UNINSTALLDIR}" "URLUpdateInfo" "${UPDATEURL}"
+	WriteRegStr HKLM "${UNINSTALLDIR}" "URLInfoAbout" "${ABOUTURL}"
+	WriteRegStr HKLM "${UNINSTALLDIR}" "DisplayVersion" "${VERSIONMAJOR}.${VERSIONMINOR}.${VERSIONBUILD}"
 	WriteRegDWORD HKLM "${UNINSTALLDIR}" "VersionMajor" ${VERSIONMAJOR}
 	WriteRegDWORD HKLM "${UNINSTALLDIR}" "VersionMinor" ${VERSIONMINOR}
 	
@@ -166,6 +169,8 @@ Section "Install"
 SectionEnd
 
 Section "Uninstall"
+	# Required to remove the system-wide Start Menu shortcut
+	SetShellVarContext all
 
 	# Remove Start Menu launcher
 	Delete /REBOOTOK "$SMPROGRAMS\${COMPANYNAME}\${APPNAME}.lnk"

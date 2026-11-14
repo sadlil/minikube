@@ -22,6 +22,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"k8s.io/klog/v2"
+	"k8s.io/minikube/cmd/minikube/cmd/flags"
 	"k8s.io/minikube/pkg/minikube/config"
 	"k8s.io/minikube/pkg/minikube/exit"
 	"k8s.io/minikube/pkg/minikube/mustload"
@@ -32,13 +33,14 @@ var nodeListCmd = &cobra.Command{
 	Use:   "list",
 	Short: "List nodes.",
 	Long:  "List existing minikube nodes.",
-	Run: func(cmd *cobra.Command, args []string) {
+	Run: func(_ *cobra.Command, args []string) {
 		if len(args) != 0 {
 			exit.Message(reason.Usage, "Usage: minikube node list")
 		}
 
+		options := flags.CommandOptions()
 		cname := ClusterFlagValue()
-		_, cc := mustload.Partial(cname)
+		_, cc := mustload.Partial(cname, options)
 
 		if len(cc.Nodes) < 1 {
 			klog.Warningf("Did not found any minikube node.")

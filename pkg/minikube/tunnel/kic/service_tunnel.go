@@ -20,44 +20,55 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/pkg/errors"
-
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	typed_core "k8s.io/client-go/kubernetes/typed/core/v1"
 
 	"k8s.io/klog/v2"
 )
 
-// ServiceTunnel ...
+// ServiceTunnel manages an SSH tunnel for a Kubernetes service.
+// It holds configuration for the SSH connection and the tunnel's state.
 type ServiceTunnel struct {
-	sshPort string
-	sshKey  string
-	v1Core  typed_core.CoreV1Interface
-	sshConn *sshConn
+	sshPort        string
+	sshKey         string
+	v1Core         typed_core.CoreV1Interface
+	sshConn        *sshConn
+	suppressStdOut bool
 }
 
-// NewServiceTunnel ...
-func NewServiceTunnel(sshPort, sshKey string, v1Core typed_core.CoreV1Interface) *ServiceTunnel {
+// NewServiceTunnel creates and returns a new ServiceTunnel instance.
+// sshPort is the port number for the SSH connection.
+// sshKey is the path to the SSH private key file.
+// v1Core is the Kubernetes CoreV1 client interface for interacting with services.
+// suppressStdOut controls whether standard output from the tunnel process should be suppressed.
+func NewServiceTunnel(sshPort, sshKey string, v1Core typed_core.CoreV1Interface, suppressStdOut bool) *ServiceTunnel {
 	return &ServiceTunnel{
-		sshPort: sshPort,
-		sshKey:  sshKey,
-		v1Core:  v1Core,
+		sshPort:        sshPort,
+		sshKey:         sshKey,
+		v1Core:         v1Core,
+		suppressStdOut: suppressStdOut,
 	}
 }
 
-// Start ...
+// Start establishes an SSH tunnel for the specified Kubernetes service.
+// It retrieves service details, creates an SSH connection with random local ports
+// for each service port, and starts the tunnel in a new goroutine.
+// It returns a slice of URLs (e.g., "http://127.0.0.1:local_port") corresponding
+// to the tunnelled ports, or an error if the setup fails.
+// Errors from the tunnel running in the background are logged via klog.
 func (t *ServiceTunnel) Start(svcName, namespace string) ([]string, error) {
 	svc, err := t.v1Core.Services(namespace).Get(context.Background(), svcName, metav1.GetOptions{})
 	if err != nil {
-		return nil, errors.Wrapf(err, "Service %s was not found in %q namespace. You may select another namespace by using 'minikube service %s -n <namespace>", svcName, namespace, svcName)
+		return nil, fmt.Errorf("Service %s was not found in %q namespace. You may select another namespace by using 'minikube service %s -n <namespace>: %w", svcName, namespace, svcName, err)
 	}
 
 	t.sshConn, err = createSSHConnWithRandomPorts(svcName, t.sshPort, t.sshKey, svc)
 	if err != nil {
-		return nil, errors.Wrap(err, "creating ssh conn")
+		return nil, fmt.Errorf("creating ssh conn: %w", err)
 	}
 
 	go func() {
+		t.sshConn.suppressStdOut = t.suppressStdOut
 		err = t.sshConn.startAndWait()
 		if err != nil {
 			klog.Errorf("error starting ssh tunnel: %v", err)
@@ -72,12 +83,11 @@ func (t *ServiceTunnel) Start(svcName, namespace string) ([]string, error) {
 	return urls, nil
 }
 
-// Stop ...
-func (t *ServiceTunnel) Stop() error {
+// Stop attempts to gracefully stop the active SSH tunnel.
+// Any errors encountered during the stop process are logged as warnings.
+func (t *ServiceTunnel) Stop() {
 	err := t.sshConn.stop()
 	if err != nil {
-		return errors.Wrap(err, "stopping ssh tunnel")
+		klog.Warningf("Failed to stop ssh tunnel: %v", err)
 	}
-
-	return nil
 }

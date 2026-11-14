@@ -20,10 +20,9 @@ import (
 	"fmt"
 	"net"
 
-	"github.com/docker/machine/libmachine"
-	"github.com/docker/machine/libmachine/host"
-	"github.com/docker/machine/libmachine/state"
-	"github.com/pkg/errors"
+	"k8s.io/minikube/pkg/libmachine"
+	"k8s.io/minikube/pkg/libmachine/host"
+	"k8s.io/minikube/pkg/libmachine/state"
 	"k8s.io/minikube/pkg/minikube/config"
 	"k8s.io/minikube/pkg/minikube/machine"
 	"k8s.io/minikube/pkg/util"
@@ -40,14 +39,14 @@ func (m *clusterInspector) getStateAndHost() (HostState, *host.Host, error) {
 	h, err := machine.LoadHost(m.machineAPI, m.machineName)
 
 	if err != nil {
-		err = errors.Wrapf(err, "error loading docker-machine host for: %s", m.machineName)
+		err = fmt.Errorf("error loading machine host for: %s: %w", m.machineName, err)
 		return Unknown, nil, err
 	}
 
 	var s state.State
 	s, err = h.Driver.GetState()
 	if err != nil {
-		err = errors.Wrapf(err, "error getting host status for %s", m.machineName)
+		err = fmt.Errorf("error getting host status for %s: %w", m.machineName, err)
 		return Unknown, nil, err
 	}
 
@@ -67,23 +66,23 @@ func (m *clusterInspector) getStateAndRoute() (HostState, *Route, error) {
 	var c *config.ClusterConfig
 	c, err = m.configLoader.LoadConfigFromFile(m.machineName)
 	if err != nil {
-		err = errors.Wrapf(err, "error loading config for %s", m.machineName)
+		err = fmt.Errorf("error loading config for %s: %w", m.machineName, err)
 		return hostState, nil, err
 	}
 
 	var route *Route
 	route, err = getRoute(h, *c)
 	if err != nil {
-		err = errors.Wrapf(err, "error getting route info for %s", m.machineName)
+		err = fmt.Errorf("error getting route info for %s: %w", m.machineName, err)
 		return hostState, nil, err
 	}
 	return hostState, route, nil
 }
 
-func getRoute(host *host.Host, clusterConfig config.ClusterConfig) (*Route, error) {
-	hostDriverIP, err := host.Driver.GetIP()
+func getRoute(hostInfo *host.Host, clusterConfig config.ClusterConfig) (*Route, error) {
+	hostDriverIP, err := hostInfo.Driver.GetIP()
 	if err != nil {
-		return nil, errors.Wrapf(err, "error getting host IP for %s", host.Name)
+		return nil, fmt.Errorf("error getting host IP for %s: %w", hostInfo.Name, err)
 	}
 
 	_, ipNet, err := net.ParseCIDR(clusterConfig.KubernetesConfig.ServiceCIDR)
@@ -94,7 +93,7 @@ func getRoute(host *host.Host, clusterConfig config.ClusterConfig) (*Route, erro
 	if ip == nil {
 		return nil, fmt.Errorf("invalid IP for host %s", hostDriverIP)
 	}
-	dnsIP, err := util.GetDNSIP(ipNet.String())
+	dnsIP, err := util.DNSIP(ipNet.String())
 	if err != nil {
 		return nil, err
 	}

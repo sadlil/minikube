@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"k8s.io/minikube/cmd/minikube/cmd/flags"
 	"k8s.io/minikube/pkg/minikube/config"
 	"k8s.io/minikube/pkg/minikube/delete"
 	"k8s.io/minikube/pkg/minikube/driver"
@@ -33,19 +34,22 @@ import (
 )
 
 var nodeDeleteCmd = &cobra.Command{
-	Use:   "delete",
-	Short: "Deletes a node from a cluster.",
-	Long:  "Deletes a node from a cluster.",
-	Run: func(cmd *cobra.Command, args []string) {
+	Use:     "delete NODE_NAME",
+	Short:   "Deletes a node from a cluster.",
+	Long:    "Deletes a node from a cluster.",
+	Example: "minikube node delete m02",
+	Run: func(_ *cobra.Command, args []string) {
 		if len(args) == 0 {
-			exit.Message(reason.Usage, "Usage: minikube node delete [name]")
+			exit.Message(reason.Usage, "Usage: minikube node delete NODE_NAME")
 		}
+
+		options := flags.CommandOptions()
 		name := args[0]
 
-		co := mustload.Healthy(ClusterFlagValue())
+		co := mustload.Healthy(ClusterFlagValue(), options)
 		out.Step(style.DeletingHost, "Deleting node {{.name}} from cluster {{.cluster}}", out.V{"name": name, "cluster": co.Config.Name})
 
-		n, err := node.Delete(*co.Config, name)
+		n, err := node.Delete(*co.Config, name, options)
 		if err != nil {
 			exit.Error(reason.GuestNodeDelete, "deleting node", err)
 		}

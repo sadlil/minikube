@@ -1,4 +1,4 @@
-// +build integration
+//go:build integration
 
 /*
 Copyright 2016 The Kubernetes Authors All rights reserved.
@@ -23,7 +23,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"os"
 	"os/exec"
 	"path"
@@ -34,6 +33,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/phayes/freeport"
 	"k8s.io/minikube/pkg/util/retry"
 )
 
@@ -46,6 +46,10 @@ const (
 )
 
 // validateMountCmd verifies the minikube mount command works properly
+// for the platforms that support it, we're testing:
+// - a generic 9p mount
+// - a 9p mount on a specific port
+// - cleaning-mechanism for profile-specific mounts
 func validateMountCmd(ctx context.Context, t *testing.T, profile string) { // nolint
 	if NoneDriver() {
 		t.Skip("skipping: none driver does not support mount")
@@ -53,22 +57,16 @@ func validateMountCmd(ctx context.Context, t *testing.T, profile string) { // no
 	if HyperVDriver() {
 		t.Skip("skipping: mount broken on hyperv: https://github.com/kubernetes/minikube/issues/5029")
 	}
+	if RootlessDriver() {
+		t.Skip("skipping: rootless driver does not support mount (because 9p is not mountable inside UserNS)")
+	}
 
 	if runtime.GOOS == "windows" {
 		t.Skip("skipping: mount broken on windows: https://github.com/kubernetes/minikube/issues/8303")
 	}
 
 	t.Run("any-port", func(t *testing.T) {
-		tempDir, err := ioutil.TempDir("", "mounttest")
-		defer func() { // clean up tempdir
-			err := os.RemoveAll(tempDir)
-			if err != nil {
-				t.Errorf("failed to clean up %q temp folder.", tempDir)
-			}
-		}()
-		if err != nil {
-			t.Fatalf("Unexpected error while creating tempDir: %v", err)
-		}
+		tempDir := t.TempDir()
 
 		ctx, cancel := context.WithTimeout(ctx, Minutes(10))
 
@@ -106,7 +104,7 @@ func validateMountCmd(ctx context.Context, t *testing.T, profile string) { // no
 		wantFromTest := []byte(testMarker)
 		for _, name := range []string{createdByTest, createdByTestRemovedByPod, testMarker} {
 			p := filepath.Join(tempDir, name)
-			err := ioutil.WriteFile(p, wantFromTest, 0644)
+			err := os.WriteFile(p, wantFromTest, 0644)
 			t.Logf("wrote %q to %s", wantFromTest, p)
 			if err != nil {
 				t.Errorf("WriteFile %s: %v", p, err)
@@ -123,7 +121,7 @@ func validateMountCmd(ctx context.Context, t *testing.T, profile string) { // no
 		if err := retry.Expo(checkMount, time.Millisecond*500, Seconds(15)); err != nil {
 			// For local testing, allow macOS users to click prompt. If they don't, skip the test.
 			if runtime.GOOS == "darwin" {
-				t.Skip("skipping: mount did not appear, likely because macOS requires prompt to allow non-codesigned binaries to listen on non-localhost port")
+				t.Skip("skipping: mount did not appear, likely because macOS requires prompt to allow non-code signed binaries to listen on non-localhost port")
 			}
 			t.Fatalf("/mount-9p did not appear within %s: %v", time.Since(start), err)
 		}
@@ -148,7 +146,7 @@ func validateMountCmd(ctx context.Context, t *testing.T, profile string) { // no
 		}
 
 		// Start the "busybox-mount" pod.
-		rr, err = Run(t, exec.CommandContext(ctx, "kubectl", "--context", profile, "replace", "--force", "-f", filepath.Join(*testdataDir, "busybox-mount-test.yaml")))
+		rr, err = Run(t, exec.CommandContext(ctx, KubectlBinary(), "--context", profile, "replace", "--force", "-f", filepath.Join(*testdataDir, "busybox-mount-test.yaml")))
 		if err != nil {
 			t.Fatalf("failed to 'kubectl replace' for busybox-mount-test. args %q : %v", rr.Command(), err)
 		}
@@ -159,7 +157,7 @@ func validateMountCmd(ctx context.Context, t *testing.T, profile string) { // no
 
 		// Read the file written by pod startup
 		p := filepath.Join(tempDir, createdByPod)
-		got, err := ioutil.ReadFile(p)
+		got, err := os.ReadFile(p)
 		if err != nil {
 			t.Errorf("failed to read file created by pod %q: %v", p, err)
 		}
@@ -169,7 +167,7 @@ func validateMountCmd(ctx context.Context, t *testing.T, profile string) { // no
 		}
 
 		// test that file written from host was read in by the pod via cat /mount-9p/written-by-host;
-		rr, err = Run(t, exec.CommandContext(ctx, "kubectl", "--context", profile, "logs", "busybox-mount"))
+		rr, err = Run(t, exec.CommandContext(ctx, KubectlBinary(), "--context", profile, "logs", "busybox-mount"))
 		if err != nil {
 			t.Errorf("failed to get kubectl logs for busybox-mount. args %q : %v", rr.Command(), err)
 		}
@@ -183,7 +181,7 @@ func validateMountCmd(ctx context.Context, t *testing.T, profile string) { // no
 			// test that file written from host was read in by the pod via cat /mount-9p/fromhost;
 			rr, err := Run(t, exec.CommandContext(ctx, Target(), "-p", profile, "ssh", "stat", gp))
 			if err != nil {
-				t.Errorf("failed to stat the file %q iniside minikube : args %q: %v", gp, rr.Command(), err)
+				t.Errorf("failed to stat the file %q inside minikube : args %q: %v", gp, rr.Command(), err)
 			}
 
 			if runtime.GOOS == "windows" {
@@ -208,20 +206,16 @@ func validateMountCmd(ctx context.Context, t *testing.T, profile string) { // no
 		}
 	})
 	t.Run("specific-port", func(t *testing.T) {
-		tempDir, err := ioutil.TempDir("", "mounttest")
-		defer func() { // clean up tempdir
-			err := os.RemoveAll(tempDir)
-			if err != nil {
-				t.Errorf("failed to clean up %q temp folder.", tempDir)
-			}
-		}()
-		if err != nil {
-			t.Fatalf("Unexpected error while creating tempDir: %v", err)
-		}
+		tempDir := t.TempDir()
 
 		ctx, cancel := context.WithTimeout(ctx, Minutes(10))
 
-		args := []string{"mount", "-p", profile, fmt.Sprintf("%s:%s", tempDir, guestMount), "--alsologtostderr", "-v=1", "--port", "46464"}
+		port, err := freeport.GetFreePort()
+		if err != nil {
+			t.Fatalf("failed to get free port: %v", err)
+		}
+		portStr := fmt.Sprintf("%d", port)
+		args := []string{"mount", "-p", profile, fmt.Sprintf("%s:%s", tempDir, guestMount), "--alsologtostderr", "-v=1", "--port", portStr}
 		ss, err := Start(t, exec.CommandContext(ctx, Target(), args...))
 		if err != nil {
 			t.Fatalf("%v failed: %v", args, err)
@@ -260,7 +254,7 @@ func validateMountCmd(ctx context.Context, t *testing.T, profile string) { // no
 		if err := retry.Expo(checkMount, time.Millisecond*500, Seconds(15)); err != nil {
 			// For local testing, allow macOS users to click prompt. If they don't, skip the test.
 			if runtime.GOOS == "darwin" {
-				t.Skip("skipping: mount did not appear, likely because macOS requires prompt to allow non-codesigned binaries to listen on non-localhost port")
+				t.Skip("skipping: mount did not appear, likely because macOS requires prompt to allow non-code signed binaries to listen on non-localhost port")
 			}
 			t.Fatalf("/mount-9p did not appear within %s: %v", time.Since(start), err)
 		}
@@ -276,7 +270,7 @@ func validateMountCmd(ctx context.Context, t *testing.T, profile string) { // no
 		t.Logf("reading mount text")
 		mountText := func() string {
 			str := ""
-			var err error = nil
+			var err error
 			for err == nil {
 				var add string
 				add, err = ss.Stdout.ReadString(0)
@@ -288,12 +282,104 @@ func validateMountCmd(ctx context.Context, t *testing.T, profile string) { // no
 			return str
 		}()
 		t.Logf("done reading mount text")
-		match, err := regexp.Match("Bind Address:\\s*[0-9.]+:46464", []byte(mountText))
+		match, err := regexp.Match("Bind Address:\\s*[0-9.]+:"+portStr, []byte(mountText))
 		if err != nil {
 			t.Fatalf("failed to match regex pattern. err: %v", err)
 		}
 		if !match {
-			t.Fatalf("failed to find bind address with port 46464. Mount command out: \n%v", mountText)
+			t.Fatalf("failed to find bind address with port %s. Mount command out: \n%v", portStr, mountText)
 		}
+	})
+
+	t.Run("VerifyCleanup", func(t *testing.T) {
+		t.Skip("skipping: flaky mount cleanup timing: https://github.com/kubernetes/minikube/issues/23139")
+		tempDir := t.TempDir()
+
+		ctx, cancel := context.WithTimeout(ctx, Minutes(10))
+
+		guestMountPaths := []string{"/mount1", "/mount2", "/mount3"}
+
+		var mntProcs []*StartSession
+		for _, guestMount := range guestMountPaths {
+			args := []string{"mount", "-p", profile, fmt.Sprintf("%s:%s", tempDir, guestMount), "--alsologtostderr", "-v=1"}
+			mntProc, err := Start(t, exec.CommandContext(ctx, Target(), args...))
+			if err != nil {
+				t.Fatalf("%v failed: %v", args, err)
+			}
+
+			mntProcs = append(mntProcs, mntProc)
+
+		}
+
+		defer func() {
+			// Still trying to stop mount processes that could otherwise
+			// (if something weird happens...) leave the test run hanging
+			// The worst thing that could happen is that we try to kill
+			// something that was aleardy killed...
+			for _, mp := range mntProcs {
+				mp.Stop(t)
+			}
+
+			cancel()
+			if *cleanup {
+				os.RemoveAll(tempDir)
+			}
+		}()
+
+		// are the mounts alive yet..?
+		checkMount := func() error {
+			for _, mnt := range guestMountPaths {
+				rr, err := Run(t, exec.CommandContext(ctx, Target(), "-p", profile, "ssh", "findmnt -T", mnt))
+				if err != nil {
+					// if something weird has happened from previous tests..
+					// this could at least spare us some waiting
+					if strings.Contains(rr.Stdout.String(), fmt.Sprintf("Profile \"%s\" not found.", profile)) {
+						t.Fatalf("profile was deleted, cancelling the test")
+					}
+					return err
+				}
+			}
+			return nil
+		}
+		if err := retry.Expo(checkMount, time.Millisecond*500, Seconds(15)); err != nil {
+			// For local testing, allow macOS users to click prompt. If they don't, skip the test.
+			if runtime.GOOS == "darwin" {
+				t.Skip("skipping: mount did not appear, likely because macOS requires prompt to allow non-code signed binaries to listen on non-localhost port")
+			}
+			t.Fatalf("mount was not ready in time: %v", err)
+		}
+
+		checkProcsAlive := func(end chan bool) {
+			for _, mntp := range mntProcs {
+				// Trying to wait for process end
+				// if the wait fail with ExitError we know that the process
+				// doesn't exist anymore..
+				go func(end chan bool) {
+					err := mntp.cmd.Wait()
+					if _, ok := err.(*exec.ExitError); ok {
+						end <- true
+					}
+				}(end)
+
+				// Either we know that the mount process has ended
+				// or we fail after 1 second
+				// TODO: is there a better way? rather than waiting..
+				select {
+				case <-time.After(1 * time.Second):
+					t.Fatalf("1s TIMEOUT: Process %d is still running\n", mntp.cmd.Process.Pid)
+				case <-end:
+					continue
+				}
+			}
+		}
+
+		// exec the mount killer
+		_, err := Run(t, exec.Command(Target(), "mount", "-p", profile, "--kill=true"))
+		if err != nil {
+			t.Fatalf("failed while trying to kill mounts")
+		}
+
+		end := make(chan bool, 1)
+		checkProcsAlive(end)
 	})
 }

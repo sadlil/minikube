@@ -14,16 +14,6 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-/*
-Script expects the following env variables:
- - UPDATE_TARGET=<string>: optional - if unset/absent, default option is "fs"; valid options are:
-   - "fs"  - update only local filesystem repo files [default]
-   - "gh"  - update only remote GitHub repo files and create PR (if one does not exist already)
-   - "all" - update local and remote repo files and create PR (if one does not exist already)
- - GITHUB_TOKEN=<string>: GitHub [personal] access token
-   - note: GITHUB_TOKEN is required if UPDATE_TARGET is "gh" or "all"
-*/
-
 package update
 
 import (
@@ -33,24 +23,18 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"os"
 	"os/exec"
 	"regexp"
 	"text/template"
 	"time"
 
-	"github.com/cenkalti/backoff/v4"
-
+	"github.com/cenkalti/backoff/v7"
 	"k8s.io/klog/v2"
 )
 
 const (
 	// FSRoot is a relative (to scripts in subfolders) root folder of local filesystem repo to update
-	FSRoot = "../../../"
-)
-
-var (
-	target = os.Getenv("UPDATE_TARGET")
+	FSRoot = "../"
 )
 
 // init klog and check general requirements
@@ -62,16 +46,11 @@ func init() {
 	if err := flag.Set("alsologtostderr", "true"); err != nil {
 		klog.Warningf("Unable to set flag value for alsologtostderr: %v", err)
 	}
+
+	// used in update_kubeadm_constants.go
+	flag.String("kubernetes-version", "latest", "kubernetes-version")
 	flag.Parse()
 	defer klog.Flush()
-
-	if target == "" {
-		target = "fs"
-	} else if target != "fs" && target != "gh" && target != "all" {
-		klog.Fatalf("Invalid UPDATE_TARGET option: '%s'; Valid options are: unset/absent (defaults to 'fs'), 'fs', 'gh', or 'all'", target)
-	} else if (target == "gh" || target == "all") && ghToken == "" {
-		klog.Fatalf("GITHUB_TOKEN is required if UPDATE_TARGET is 'gh' or 'all'")
-	}
 }
 
 // Item defines Content where all occurrences of each Replace map key,
@@ -79,8 +58,8 @@ func init() {
 // would be swapped with its respective actual map value (having placeholders replaced with data), creating a concrete update plan.
 // Replace map keys can use RegExp and map values can use Golang Text Template.
 type Item struct {
-	Content []byte            `json:"-"`
-	Replace map[string]string `json:"replace"`
+	Content []byte
+	Replace map[string]string
 }
 
 // apply updates Item Content by replacing all occurrences of Replace map's keys with their actual map values (with placeholders replaced with data).
@@ -90,7 +69,7 @@ func (i *Item) apply(data interface{}) error {
 	}
 	str := string(i.Content)
 	for src, dst := range i.Replace {
-		out, err := ParseTmpl(dst, data, "")
+		out, err := parseTmpl(dst, data, "")
 		if err != nil {
 			return err
 		}
@@ -102,56 +81,31 @@ func (i *Item) apply(data interface{}) error {
 	return nil
 }
 
-// Apply applies concrete update plan (schema + data) to GitHub or local filesystem repo
-func Apply(ctx context.Context, schema map[string]Item, data interface{}, prBranchPrefix, prTitle string, prIssue int) {
-	schema, pretty, err := GetPlan(schema, data)
+// Apply applies concrete update plan (schema + data) to local filesystem repo
+func Apply(schema map[string]Item, data interface{}) error {
+	schema, pretty, err := getPlan(schema, data)
 	if err != nil {
 		klog.Fatalf("Unable to parse schema: %v\n%s", err, pretty)
 	}
 	klog.Infof("The Plan:\n%s", pretty)
 
-	if target == "fs" || target == "all" {
-		changed, err := fsUpdate(FSRoot, schema, data)
-		if err != nil {
-			klog.Errorf("Unable to update local repo: %v", err)
-		} else if !changed {
-			klog.Infof("Local repo update skipped: nothing changed")
-		} else {
-			klog.Infof("Local repo successfully updated")
-		}
+	changed, err := fsUpdate(FSRoot, schema, data)
+	if err != nil {
+		klog.Errorf("Unable to update local repo: %v", err)
+		return err
+	} else if !changed {
+		klog.Infof("Local repo update skipped: nothing changed")
+	} else {
+		klog.Infof("Local repo successfully updated")
 	}
-
-	if target == "gh" || target == "all" {
-		// update prTitle replacing template placeholders with actual data values
-		if prTitle, err = ParseTmpl(prTitle, data, "prTitle"); err != nil {
-			klog.Fatalf("Unable to parse PR Title: %v", err)
-		}
-
-		// check if PR already exists
-		prURL, err := ghFindPR(ctx, prTitle, ghOwner, ghRepo, ghBase, ghToken)
-		if err != nil {
-			klog.Errorf("Unable to check if PR already exists: %v", err)
-		} else if prURL != "" {
-			klog.Infof("PR create skipped: already exists (%s)", prURL)
-		} else {
-			// create PR
-			pr, err := ghCreatePR(ctx, ghOwner, ghRepo, ghBase, prBranchPrefix, prTitle, prIssue, ghToken, schema, data)
-			if err != nil {
-				klog.Fatalf("Unable to create PR: %v", err)
-			} else if pr == nil {
-				klog.Infof("PR create skipped: nothing changed")
-			} else {
-				klog.Infof("PR successfully created: %s", *pr.HTMLURL)
-			}
-		}
-	}
+	return nil
 }
 
-// GetPlan returns concrete plan replacing placeholders in schema with actual data values, returns JSON-formatted representation of the plan and any error occurred.
-func GetPlan(schema map[string]Item, data interface{}) (plan map[string]Item, prettyprint string, err error) {
+// getPlan returns concrete plan replacing placeholders in schema with actual data values, returns JSON-formatted representation of the plan and any error occurred.
+func getPlan(schema map[string]Item, data interface{}) (plan map[string]Item, prettyprint string, err error) {
 	plan = make(map[string]Item)
 	for p, item := range schema {
-		path, err := ParseTmpl(p, data, "")
+		path, err := parseTmpl(p, data, "")
 		if err != nil {
 			return plan, fmt.Sprintf("%+v", schema), err
 		}
@@ -160,7 +114,7 @@ func GetPlan(schema map[string]Item, data interface{}) (plan map[string]Item, pr
 
 	for _, item := range plan {
 		for src, dst := range item.Replace {
-			out, err := ParseTmpl(dst, data, "")
+			out, err := parseTmpl(dst, data, "")
 			if err != nil {
 				return plan, fmt.Sprintf("%+v", schema), err
 			}
@@ -175,48 +129,39 @@ func GetPlan(schema map[string]Item, data interface{}) (plan map[string]Item, pr
 	return plan, string(str), nil
 }
 
-// RunWithRetryNotify runs command cmd with stdin using exponential backoff for maxTime duration
+// runWithRetryNotify runs command cmd with stdin using exponential backoff for maxTime duration
 // up to maxRetries (negative values will make it ignored),
 // notifies about any intermediary errors and return any final error.
 // similar to pkg/util/retry/retry.go:Expo(), just for commands with params and also with context
-func RunWithRetryNotify(ctx context.Context, cmd *exec.Cmd, stdin io.Reader, maxTime time.Duration, maxRetries uint64) error {
+func runWithRetryNotify(ctx context.Context, cmd *exec.Cmd, stdin io.Reader, maxTime time.Duration, maxRetries uint64) error {
 	be := backoff.NewExponentialBackOff()
 	be.Multiplier = 2
-	be.MaxElapsedTime = maxTime
-	bm := backoff.WithMaxRetries(be, maxRetries)
-	bc := backoff.WithContext(bm, ctx)
 
 	notify := func(err error, wait time.Duration) {
 		klog.Errorf("Temporary error running '%s' (will retry in %s): %v", cmd.String(), wait, err)
 	}
-	if err := backoff.RetryNotify(func() error {
+
+	op := func() (struct{}, error) {
 		cmd.Stdin = stdin
 		var stderr bytes.Buffer
 		cmd.Stderr = &stderr
 		if err := cmd.Run(); err != nil {
-			time.Sleep(be.NextBackOff().Round(1 * time.Second))
-			return fmt.Errorf("%w: %s", err, stderr.String())
+			return struct{}{}, fmt.Errorf("%w: %s", err, stderr.String())
 		}
-		return nil
-	}, bc, notify); err != nil {
-		return err
+		return struct{}{}, nil
 	}
-	return nil
+
+	_, err := backoff.Retry(ctx, op,
+		backoff.WithBackOff(be),
+		backoff.WithMaxElapsedTime(maxTime),
+		backoff.WithMaxTries(uint(maxRetries)),
+		backoff.WithNotify(notify),
+	)
+	return err
 }
 
-// Run runs command cmd with stdin
-func Run(cmd *exec.Cmd, stdin io.Reader) error {
-	cmd.Stdin = stdin
-	var out bytes.Buffer
-	cmd.Stderr = &out
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("%w: %s", err, out.String())
-	}
-	return nil
-}
-
-// ParseTmpl replaces placeholders in text with actual data values
-func ParseTmpl(text string, data interface{}, name string) (string, error) {
+// parseTmpl replaces placeholders in text with actual data values
+func parseTmpl(text string, data interface{}, name string) (string, error) {
 	tmpl := template.Must(template.New(name).Parse(text))
 	buf := new(bytes.Buffer)
 	if err := tmpl.Execute(buf, data); err != nil {

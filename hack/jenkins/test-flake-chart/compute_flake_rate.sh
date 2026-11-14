@@ -39,7 +39,7 @@ CLOSE_ISSUE_THRESHOLD=20
 
 "${DIR}/../installers/check_install_gh.sh" || true
 
-# Get a list of issues from Github and extract only those that look like flake issues.
+# Get a list of issues from GitHub and extract only those that look like flake issues.
 # Sort by test name for later usage.
 EXISTING_ISSUES_LIST=$(mktemp)
 gh issue list -L 10000 -s all -A "minikube-bot" -l kind/failing-test \
@@ -161,7 +161,7 @@ for ROW in $(cat ${MID_FLAKES_ISSUES}); do
   # Clear $ISSUE_BODY_TMP and fill with the standard header.
   printf "This test has high flake rates for the following environments:\n\n|Environment|Flake Rate (%%)|\n|---|---|\n" > "${ISSUE_BODY_TMP}"
 
-  TEST_CHART_LINK_FORMAT='https://storage.googleapis.com/minikube-flake-rate/flake_chart.html?env=%1$s&test='${TEST_NAME}
+  TEST_CHART_LINK_FORMAT='https://gopogh-server-tts3vkcpgq-uc.a.run.app/?env=%1$s&test='${TEST_NAME}
   # 1) Filter $MID_FLAKES_DATA to only include entries with the given test name
   # 2) Sort by flake rates in descending order
   # 3) Format the entry into a row in the table

@@ -39,6 +39,8 @@ const (
 	nodeRoleLabelKey = "role.minikube.sigs.k8s.io"
 	// CreatedByLabelKey is applied to any container/volume that is created by minikube created_by.minikube.sigs.k8s.io=true
 	CreatedByLabelKey = "created_by.minikube.sigs.k8s.io"
+	// NoLimit is the value that specifies that no resource limit should be set
+	NoLimit = "0"
 )
 
 // CreateParams are parameters needed to create a container
@@ -58,7 +60,8 @@ type CreateParams struct {
 	ExtraArgs     []string          // a list of any extra option to pass to oci binary during creation time, for example --expose 8080...
 	OCIBinary     string            // docker or podman
 	Network       string            // network name that the container will attach to
-	IP            string            // static IP to assign for th container in the cluster network
+	IP            string            // static IP to assign the container in the cluster network
+	GPUs          string            // add GPU devices to the container
 }
 
 // createOpt is an option for Create
@@ -84,11 +87,13 @@ https://github.com/kubernetes/kubernetes/blob/063e7ff358fdc8b0916e6f39beedc0d025
 // names on disk as opposed to the int32 values, and the serlialzed field names
 // have been made closer to core/v1 VolumeMount field names
 // In yaml this looks like:
-//  containerPath: /foo
-//  hostPath: /bar
-//  readOnly: true
-//  selinuxRelabel: false
-//  propagation: None
+//
+//	containerPath: /foo
+//	hostPath: /bar
+//	readOnly: true
+//	selinuxRelabel: false
+//	propagation: None
+//
 // Propagation may be one of: None, HostToContainer, Bidirectional
 type Mount struct {
 	// Path of the mount within the container.
@@ -126,7 +131,7 @@ func ParseMountString(spec string) (m Mount, err error) {
 	case 1:
 		m.ContainerPath = fields[0]
 	case 3:
-		for _, opt := range strings.Split(fields[2], ",") {
+		for opt := range strings.SplitSeq(fields[2], ",") {
 			switch opt {
 			case "Z":
 				m.SelinuxRelabel = true
@@ -158,9 +163,10 @@ func ParseMountString(spec string) (m Mount, err error) {
 
 // PortMapping specifies a host port mapped into a container port.
 // In yaml this looks like:
-//  containerPort: 80
-//  hostPort: 8000
-//  listenAddress: 127.0.0.1
+//
+//	containerPort: 80
+//	hostPort: 8000
+//	listenAddress: 127.0.0.1
 type PortMapping struct {
 	// Port within the container.
 	ContainerPort int32 `protobuf:"varint,1,opt,name=container_port,json=containerPort,proto3" json:"containerPort,omitempty"`

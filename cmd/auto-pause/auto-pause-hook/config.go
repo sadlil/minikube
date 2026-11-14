@@ -20,7 +20,6 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
-	"fmt"
 	"log"
 
 	v1 "k8s.io/api/admissionregistration/v1"
@@ -59,7 +58,7 @@ func apiServerCert(clientset *kubernetes.Clientset) []byte {
 
 	pem, ok := c.Data["requestheader-client-ca-file"]
 	if !ok {
-		klog.Fatalf(fmt.Sprintf("cannot find the ca.crt in the configmap, configMap.Data is %#v", c.Data))
+		klog.Fatalf("cannot find the ca.crt in the configmap, configMap.Data is %#v", c.Data)
 	}
 	klog.Info("client-ca-file=", pem)
 	return []byte(pem)
@@ -91,8 +90,8 @@ func selfRegistration(clientset *kubernetes.Clientset, caCert []byte) {
 			klog.Fatal(err2)
 		}
 	}
-	var failurePolicy v1.FailurePolicyType = v1.Fail
-	var sideEffects v1.SideEffectClass = v1.SideEffectClassNone
+	var failurePolicy = v1.Fail
+	var sideEffects = v1.SideEffectClassNone
 
 	webhookConfig := &v1.MutatingWebhookConfiguration{
 		ObjectMeta: metav1.ObjectMeta{

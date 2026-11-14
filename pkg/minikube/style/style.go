@@ -41,14 +41,16 @@ type Options struct {
 	Prefix string
 	// LowPrefix is the 7-bit compatible prefix we fallback to for less-awesome terminals
 	LowPrefix string
-	// OmitNewline omits a newline at the end of a message.
-	OmitNewline bool
-	// Spinner is a character to place at ending of message
-	Spinner bool
+	// ShouldSpin is a character to place at ending of message
+	ShouldSpin    bool
+	HideAfterSpin bool // Hide the prefix after spinning
 }
 
 // SpinnerCharacter is which of the spinner.CharSets to use
 const SpinnerCharacter = 9
+
+// SpinnerSubStepCharacter is Character to use for sub-steps in a spinner (it looks like a progress bar)
+const SpinnerSubStepCharacter = 40
 
 // Config is a map of style name to style struct
 // For consistency, ensure that emojis added render with the same width across platforms.
@@ -72,8 +74,8 @@ var Config = map[Enum]Options{
 	Pause:              {Prefix: "⏸️  "},
 	Provisioning:       {Prefix: "🌱  "},
 	Ready:              {Prefix: "🏄  "},
-	Restarting:         {Prefix: "🔄  "},
-	Running:            {Prefix: "🏃  "},
+	Restarting:         {Prefix: "🔄  ", ShouldSpin: true},
+	Running:            {Prefix: "🏃  ", ShouldSpin: true}, // this is used when minikube start for a second time (already started)
 	Sparkle:            {Prefix: "✨  "},
 	Stopped:            {Prefix: "🛑  "},
 	Stopping:           {Prefix: "✋  "},
@@ -84,7 +86,7 @@ var Config = map[Enum]Options{
 	URL:                {Prefix: "👉  ", LowPrefix: LowIndent},
 	Usage:              {Prefix: "💡  "},
 	Waiting:            {Prefix: "⌛  "},
-	WaitingWithSpinner: {Prefix: "⌛  ", OmitNewline: true, Spinner: true},
+	WaitingWithSpinner: {Prefix: "⌛  ", ShouldSpin: true},
 	Unsupported:        {Prefix: "🚡  "},
 	Workaround:         {Prefix: "👉  ", LowPrefix: LowIndent},
 
@@ -113,11 +115,11 @@ var Config = map[Enum]Options{
 	Copying:          {Prefix: "✨  "},
 	CRIO:             {Prefix: "🎁  "}, // This should be a snow-flake, but the emoji has a strange width on macOS
 	DeletingHost:     {Prefix: "🔥  "},
-	Docker:           {Prefix: "🐳  ", OmitNewline: true, Spinner: true},
+	Docker:           {Prefix: "🐳  ", ShouldSpin: true},
 	DryRun:           {Prefix: "🌵  "},
 	Enabling:         {Prefix: "🔌  "},
 	FileDownload:     {Prefix: "💾  "},
-	Fileserver:       {Prefix: "🚀  ", OmitNewline: true},
+	Fileserver:       {Prefix: "🚀  "},
 	HealthCheck:      {Prefix: "🔎  "},
 	Internet:         {Prefix: "🌐  "},
 	ISODownload:      {Prefix: "💿  "},
@@ -132,13 +134,14 @@ var Config = map[Enum]Options{
 	Shutdown:         {Prefix: "🛑  "},
 	StartingNone:     {Prefix: "🤹  "},
 	StartingSSH:      {Prefix: "🔗  "},
-	StartingVM:       {Prefix: "🔥  ", OmitNewline: true, Spinner: true},
-	SubStep:          {Prefix: "    ▪ ", LowPrefix: LowIndentBullet, OmitNewline: true, Spinner: true},
+	StartingVM:       {Prefix: "🔥  ", ShouldSpin: true},
+	SubStep:          {Prefix: "    ▪ ", LowPrefix: LowIndentBullet, ShouldSpin: true, HideAfterSpin: true},
 	Tip:              {Prefix: "💡  "},
 	Unmount:          {Prefix: "🔥  "},
-	VerifyingNoLine:  {Prefix: "🤔  ", OmitNewline: true},
+	VerifyingNoLine:  {Prefix: "🤔  "},
 	Verifying:        {Prefix: "🤔  "},
 	CNI:              {Prefix: "🔗  "},
+	Toolkit:          {Prefix: "🛠️   "},
 }
 
 // LowPrefix returns a 7-bit compatible prefix for a style

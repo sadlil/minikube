@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: image-load-in-use-v1
+  labels:
+    run: image-load-in-use-v1
+spec:
+  containers:
+  - name: test
+    image: localhost/image-load-in-use:test
+    imagePullPolicy: Never
+    # Trap TERM so delete does not wait out the 30s grace period.
+    command: ["sh", "-c", "trap exit TERM; sleep infinity & wait"]
+  restartPolicy: Never

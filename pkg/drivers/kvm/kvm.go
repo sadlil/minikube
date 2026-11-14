@@ -1,4 +1,4 @@
-// +build linux
+//go:build linux && amd64
 
 /*
 Copyright 2016 The Kubernetes Authors All rights reserved.
@@ -25,121 +25,29 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/docker/machine/libmachine/drivers"
-	"github.com/docker/machine/libmachine/log"
-	"github.com/docker/machine/libmachine/state"
-	libvirt "github.com/libvirt/libvirt-go"
-	"github.com/pkg/errors"
-	pkgdrivers "k8s.io/minikube/pkg/drivers"
+	"errors"
+
+	"k8s.io/minikube/pkg/drivers/common"
+	"k8s.io/minikube/pkg/libmachine/drivers"
+	"k8s.io/minikube/pkg/libmachine/log"
+	"k8s.io/minikube/pkg/libmachine/state"
 	"k8s.io/minikube/pkg/util/retry"
+	"libvirt.org/go/libvirt"
 )
-
-// Driver is the machine driver for KVM
-type Driver struct {
-	*drivers.BaseDriver
-	*pkgdrivers.CommonDriver
-
-	// How much memory, in MB, to allocate to the VM
-	Memory int
-
-	// How many cpus to allocate to the VM
-	CPU int
-
-	// The name of the default network
-	Network string
-
-	// The name of the private network
-	PrivateNetwork string
-
-	// The size of the disk to be created for the VM, in MB
-	DiskSize int
-
-	// The path of the disk .img
-	DiskPath string
-
-	// A file or network URI to fetch the minikube ISO
-	Boot2DockerURL string
-
-	// The location of the iso to boot from
-	ISO string
-
-	// The randomly generated MAC Address
-	// If empty, a random MAC will be generated.
-	MAC string
-
-	// The randomly generated MAC Address for the NIC attached to the private network
-	// If empty, a random MAC will be generated.
-	PrivateMAC string
-
-	// Whether to passthrough GPU devices from the host to the VM.
-	GPU bool
-
-	// Whether to hide the KVM hypervisor signature from the guest
-	Hidden bool
-
-	// XML that needs to be added to passthrough GPU devices.
-	DevicesXML string
-
-	// QEMU Connection URI
-	ConnectionURI string
-
-	// NUMA node count default value is 1
-	NUMANodeCount int
-
-	// NUMA XML
-	NUMANodeXML string
-}
-
-const (
-	qemusystem                = "qemu:///system"
-	defaultPrivateNetworkName = "minikube-net"
-	defaultNetworkName        = "default"
-)
-
-// NewDriver creates a new driver for a host
-func NewDriver(hostName, storePath string) *Driver {
-	return &Driver{
-		BaseDriver: &drivers.BaseDriver{
-			MachineName: hostName,
-			StorePath:   storePath,
-			SSHUser:     "docker",
-		},
-		CommonDriver:   &pkgdrivers.CommonDriver{},
-		PrivateNetwork: defaultPrivateNetworkName,
-		Network:        defaultNetworkName,
-		ConnectionURI:  qemusystem,
-	}
-}
-
-// PreCommandCheck checks the connection before issuing a command
-func (d *Driver) PreCommandCheck() error {
-	conn, err := getConnection(d.ConnectionURI)
-	if err != nil {
-		return errors.Wrap(err, "error connecting to libvirt socket. Have you added yourself to the libvirtd group?")
-	}
-	defer conn.Close()
-
-	libVersion, err := conn.GetLibVersion()
-	if err != nil {
-		return errors.Wrap(err, "getting libvirt version")
-	}
-	log.Debugf("Using libvirt version %d", libVersion)
-
-	return nil
-}
 
 // GetURL returns a Docker URL inside this host
 // e.g. tcp://1.2.3.4:2376
 // more info https://github.com/docker/machine/blob/b170508bf44c3405e079e26d5fdffe35a64c6972/libmachine/provision/utils.go#L159_L175
 func (d *Driver) GetURL() (string, error) {
 	if err := d.PreCommandCheck(); err != nil {
-		return "", errors.Wrap(err, "getting URL, precheck failed")
+		return "", fmt.Errorf("prechecking: %w", err)
 	}
 
 	ip, err := d.GetIP()
 	if err != nil {
-		return "", errors.Wrap(err, "getting URL, could not get IP")
+		return "", fmt.Errorf("getting domain IP: %w", err)
 	}
+
 	if ip == "" {
 		return "", nil
 	}
@@ -147,77 +55,112 @@ func (d *Driver) GetURL() (string, error) {
 	return fmt.Sprintf("tcp://%s:2376", ip), nil
 }
 
-// GetState returns the state that the host is in (running, stopped, etc)
-func (d *Driver) GetState() (st state.State, err error) {
-	dom, conn, err := d.getDomain()
+// PreCommandCheck checks the connection before issuing a command
+func (d *Driver) PreCommandCheck() error {
+	conn, err := getConnection(d.ConnectionURI)
 	if err != nil {
-		return state.None, errors.Wrap(err, "getting connection")
+		return fmt.Errorf("failed opening libvirt connection: %w", err)
 	}
 	defer func() {
-		if ferr := closeDomain(dom, conn); ferr != nil {
-			err = ferr
+		if _, err := conn.Close(); err != nil {
+			log.Errorf("failed closing libvirt connection: %v", lvErr(err))
+		}
+	}()
+
+	libVersion, err := conn.GetLibVersion()
+	if err != nil {
+		return fmt.Errorf("getting libvirt version: %w", err)
+	}
+
+	log.Debugf("using libvirt version %d", libVersion)
+
+	return nil
+}
+
+// GetState returns the state that the host is in (running, stopped, etc)
+func (d *Driver) GetState() (state.State, error) {
+	dom, conn, err := d.getDomain()
+	if err != nil {
+		return state.None, fmt.Errorf("getting domain: %w", err)
+	}
+	defer func() {
+		if err := closeDomain(dom, conn); err != nil {
+			log.Errorf("failed closing domain: %v", err)
 		}
 	}()
 
 	lvs, _, err := dom.GetState() // state, reason, error
 	if err != nil {
-		return state.None, errors.Wrap(err, "getting domain state")
+		return state.None, fmt.Errorf("getting domain state: %w", err)
 	}
-	st = machineState(lvs)
-	return // st, err
+
+	return machineState(lvs), nil
 }
 
 // machineState converts libvirt state to libmachine state
 func machineState(lvs libvirt.DomainState) state.State {
-	// Possible States:
-	//
-	// VIR_DOMAIN_NOSTATE no state
-	// VIR_DOMAIN_RUNNING the domain is running
-	// VIR_DOMAIN_BLOCKED the domain is blocked on resource
-	// VIR_DOMAIN_PAUSED the domain is paused by user
-	// VIR_DOMAIN_SHUTDOWN the domain is being shut down
-	// VIR_DOMAIN_SHUTOFF the domain is shut off
-	// VIR_DOMAIN_CRASHED the domain is crashed
-	// VIR_DOMAIN_PMSUSPENDED the domain is suspended by guest power management
-	// VIR_DOMAIN_LAST this enum value will increase over time as new events are added to the libvirt API. It reflects the last state supported by this version of the libvirt API.
+	// Possible States (ref: https://libvirt.org/html/libvirt-libvirt-domain.html#virDomainState):
+	// - VIR_DOMAIN_NOSTATE no state
+	// - VIR_DOMAIN_RUNNING the domain is running
+	// - VIR_DOMAIN_BLOCKED the domain is blocked on resource
+	// - VIR_DOMAIN_PAUSED the domain is paused by user
+	// - VIR_DOMAIN_SHUTDOWN the domain is being shut down
+	// - VIR_DOMAIN_SHUTOFF the domain is shut off
+	// - VIR_DOMAIN_CRASHED the domain is crashed
+	// - VIR_DOMAIN_PMSUSPENDED the domain is suspended by guest power management
+	// - VIR_DOMAIN_LAST this enum value will increase over time as new events are added to the libvirt API. It reflects the last state supported by this version of the libvirt API.
 
 	switch lvs {
-	// DOMAIN_SHUTDOWN technically means the VM is still running, but in the
-	// process of being shutdown, so we return state.Running
-	case libvirt.DOMAIN_RUNNING, libvirt.DOMAIN_SHUTDOWN:
+	case libvirt.DOMAIN_RUNNING:
 		return state.Running
 	case libvirt.DOMAIN_BLOCKED, libvirt.DOMAIN_CRASHED:
 		return state.Error
 	case libvirt.DOMAIN_PAUSED:
 		return state.Paused
+	case libvirt.DOMAIN_SHUTDOWN:
+		return state.Stopping
 	case libvirt.DOMAIN_SHUTOFF:
 		return state.Stopped
 	case libvirt.DOMAIN_PMSUSPENDED:
 		return state.Saved
-	case libvirt.DOMAIN_NOSTATE:
-		return state.None
-	default:
+	default: // includes libvirt.DOMAIN_NOSTATE
 		return state.None
 	}
 }
 
 // GetIP returns an IP or hostname that this host is available at
+// Returns the stored address if available, otherwise queries libvirt.
 func (d *Driver) GetIP() (string, error) {
+	if d.IPAddress != "" {
+		return d.IPAddress, nil
+	}
+
 	s, err := d.GetState()
 	if err != nil {
-		return "", errors.Wrap(err, "machine in unknown state")
+		return "", fmt.Errorf("getting domain state: %w", err)
 	}
+
 	if s != state.Running {
-		return "", errors.New("host is not running")
+		return "", errors.New("IP address is not set and domain is not running")
 	}
 
-	conn, err := getConnection(d.ConnectionURI)
+	dom, conn, err := d.getDomain()
 	if err != nil {
-		return "", errors.Wrap(err, "getting libvirt connection")
+		return "", fmt.Errorf("failed getting domain: %w", err)
 	}
-	defer conn.Close()
+	defer func() {
+		if err := closeDomain(dom, conn); err != nil {
+			log.Errorf("failed closing domain: %v", err)
+		}
+	}()
 
-	return ipFromXML(conn, d.MachineName, d.PrivateNetwork)
+	ip := d.lookupIP(dom)
+	if ip == "" {
+		return "", fmt.Errorf("IP address not found for domain %s", d.MachineName)
+	}
+
+	d.IPAddress = ip
+	return ip, nil
 }
 
 // GetSSHHostname returns hostname for use with ssh
@@ -231,143 +174,227 @@ func (d *Driver) DriverName() string {
 }
 
 // Kill stops a host forcefully, including any containers that we are managing.
-func (d *Driver) Kill() (err error) {
+func (d *Driver) Kill() error {
+	s, err := d.GetState()
+	if err != nil {
+		return fmt.Errorf("getting domain state: %w", err)
+	}
+
+	if s == state.Stopped {
+		return nil
+	}
+
+	log.Info("killing domain...")
+
 	dom, conn, err := d.getDomain()
 	if err != nil {
-		return errors.Wrap(err, "getting connection")
+		return fmt.Errorf("getting domain: %w", err)
 	}
 	defer func() {
-		if ferr := closeDomain(dom, conn); ferr != nil {
-			err = ferr
+		if err := closeDomain(dom, conn); err != nil {
+			log.Errorf("failed closing domain: %v", err)
 		}
 	}()
+
+	// ref: https://libvirt.org/html/libvirt-libvirt-domain.html#virDomainDestroy
+	//   "virDomainDestroy first requests that a guest terminate (e.g. SIGTERM), then waits for it to comply.
+	//    After a reasonable timeout, if the guest still exists, virDomainDestroy will forcefully terminate the guest (e.g. SIGKILL)
+	//    if necessary (which may produce undesirable results, for example unflushed disk cache in the guest).
+	//    To avoid this possibility, it's recommended to instead call virDomainDestroyFlags, sending the VIR_DOMAIN_DESTROY_GRACEFUL flag."
+	// ref: https://libvirt.org/html/libvirt-libvirt-domain.html#virDomainDestroyFlags
+	// ref: https://libvirt.org/html/libvirt-libvirt-domain.html#virDomainDestroyFlagsValues
+	// we're using default virDomainDestroyFlags - ie, VIR_DOMAIN_DESTROY_DEFAULT (0), the "Default behavior - could lead to data loss!!"
 	return dom.Destroy()
 }
 
 // Restart a host
 func (d *Driver) Restart() error {
-	return pkgdrivers.Restart(d)
+	log.Info("restarting domain...")
+	return common.Restart(d)
 }
 
 // Start a host
-func (d *Driver) Start() (err error) {
+func (d *Driver) Start() error {
+	log.Info("starting domain...")
+
 	// this call ensures that all networks are active
-	log.Info("Ensuring networks are active...")
-	err = d.ensureNetwork()
-	if err != nil {
-		return errors.Wrap(err, "ensuring active networks")
+	log.Info("ensuring networks are active...")
+	if err := d.ensureNetwork(); err != nil {
+		return fmt.Errorf("ensuring active networks: %w", err)
 	}
 
-	log.Info("Getting domain xml...")
+	log.Info("getting domain XML...")
 	dom, conn, err := d.getDomain()
 	if err != nil {
-		return errors.Wrap(err, "getting connection")
+		return fmt.Errorf("getting domain XML: %w", err)
 	}
 	defer func() {
-		if ferr := closeDomain(dom, conn); ferr != nil {
-			err = ferr
+		if err := closeDomain(dom, conn); err != nil {
+			log.Errorf("failed closing domain: %v", err)
 		}
 	}()
 
-	log.Info("Creating domain...")
+	domXML, err := dom.GetXMLDesc(libvirt.DOMAIN_XML_SECURE)
+	if err != nil {
+		log.Debugf("failed to get domain XML: %v", lvErr(err))
+	} else {
+		log.Debugf("starting domain XML:\n%s", domXML)
+	}
+
 	if err := dom.Create(); err != nil {
-		return errors.Wrap(err, "error creating VM")
+		return fmt.Errorf("creating domain: %w", err)
 	}
 
-	log.Info("Waiting to get IP...")
-	if err := d.waitForStaticIP(conn); err != nil {
-		return errors.Wrap(err, "IP not available after waiting")
+	log.Info("waiting for domain to start...")
+	if err := d.waitForDomainState(state.Running, 30*time.Second); err != nil {
+		return fmt.Errorf("waiting for domain to start: %w", err)
+	}
+	log.Info("domain is now running")
+
+	if err := d.waitForStaticIP(dom, conn, 90*time.Second); err != nil {
+		return fmt.Errorf("waiting for IP: %w", err)
 	}
 
-	log.Info("Waiting for SSH to be available...")
+	log.Info("waiting for SSH...")
 	if err := drivers.WaitForSSH(d); err != nil {
-		return errors.Wrap(err, "SSH not available after waiting")
+		return fmt.Errorf("waiting for SSH: %w", err)
 	}
 
+	return nil
+}
+
+// waitForDomainState waits maxTime for the domain to reach a target state.
+func (d *Driver) waitForDomainState(targetState state.State, maxTime time.Duration) error {
+	query := func() error {
+		currentState, err := d.GetState()
+		if err != nil {
+			return fmt.Errorf("failed getting domain state: %w", err)
+		}
+
+		if currentState == targetState {
+			return nil
+		}
+
+		log.Debugf("current domain state is %q, will retry", currentState.String())
+		return fmt.Errorf("last domain state: %q", currentState.String())
+	}
+	if err := retry.Local(query, maxTime); err != nil {
+		return fmt.Errorf("timed out waiting %v for domain to reach %q state: %w", maxTime, targetState.String(), err)
+	}
 	return nil
 }
 
 // waitForStaticIP waits for IP address of domain that has been created & starting and then makes that IP static.
-func (d *Driver) waitForStaticIP(conn *libvirt.Connect) error {
-	query := func() error {
-		sip, err := ipFromAPI(conn, d.MachineName, d.PrivateNetwork)
-		if err != nil {
-			return fmt.Errorf("failed getting IP during machine start, will retry: %w", err)
+// Polling is required since libvirt does not provide an event for DHCP lease changes.
+func (d *Driver) waitForStaticIP(dom *libvirt.Domain, conn *libvirt.Connect, maxTime time.Duration) error {
+	log.Infof("waiting for IP address for %s (timeout %v)", d.MachineName, maxTime)
+	start := time.Now()
+	deadline := start.Add(maxTime)
+	for attempt := 1; ; attempt++ {
+		log.Debugf("looking up IP address (attempt %d)", attempt)
+		ip := d.lookupIP(dom)
+		if ip != "" {
+			log.Infof("found IP address %s for %s in %.3f seconds", ip, d.MachineName, time.Since(start).Seconds())
+			d.reserveIP(conn, ip)
+			return nil
 		}
-		if sip == "" {
-			return fmt.Errorf("waiting for machine to come up")
+		if time.Now().After(deadline) {
+			return fmt.Errorf("domain %s didn't return IP after %v", d.MachineName, maxTime)
 		}
-
-		log.Infof("Found IP for machine: %s", sip)
-		d.IPAddress = sip
-
-		return nil
+		time.Sleep(2 * time.Second)
 	}
-	if err := retry.Local(query, 1*time.Minute); err != nil {
-		return fmt.Errorf("machine %s didn't return IP after 1 minute", d.MachineName)
-	}
+}
 
-	log.Info("Reserving static IP address...")
-	if err := addStaticIP(conn, d.PrivateNetwork, d.MachineName, d.PrivateMAC, d.IPAddress); err != nil {
-		log.Warnf("Failed reserving static IP %s for host %s, will continue anyway: %v", d.IPAddress, d.MachineName, err)
-	} else {
-		log.Infof("Reserved static IP address: %s", d.IPAddress)
+// reserveIP stores the IP in the driver and reserves it as a static DHCP lease.
+func (d *Driver) reserveIP(conn *libvirt.Connect, ip string) {
+	d.IPAddress = ip
+	log.Infof("found domain IP: %s", ip)
+	if err := addStaticIP(conn, d.PrivateNetwork, d.MachineName, d.PrivateMAC, ip); err != nil {
+		log.Warnf("failed reserving static IP address %s for domain %s, will continue anyway: %v", ip, d.MachineName, err)
 	}
-
-	return nil
 }
 
 // Create a host using the driver's config
-func (d *Driver) Create() (err error) {
-	log.Info("Creating KVM machine...")
-	defer log.Infof("KVM machine creation complete!")
-	err = d.createNetwork()
-	if err != nil {
-		return errors.Wrap(err, "creating network")
+func (d *Driver) Create() error {
+	log.Info("creating domain...")
+
+	log.Info("creating network...")
+	if err := d.createNetwork(); err != nil {
+		return fmt.Errorf("creating network: %w", err)
 	}
+
 	if d.GPU {
-		log.Info("Creating devices...")
-		d.DevicesXML, err = getDevicesXML()
+		log.Info("getting devices XML...")
+		xml, err := getDevicesXML()
 		if err != nil {
-			return errors.Wrap(err, "creating devices")
+			return fmt.Errorf("getting devices XML: %w", err)
 		}
+		d.DevicesXML = xml
 	}
 
 	if d.NUMANodeCount > 1 {
 		numaXML, err := numaXML(d.CPU, d.Memory, d.NUMANodeCount)
 		if err != nil {
-			return errors.Wrap(err, "creating NUMA XML")
+			return fmt.Errorf("creating NUMA XML: %w", err)
 		}
 		d.NUMANodeXML = numaXML
 	}
 
 	store := d.ResolveStorePath(".")
-	log.Infof("Setting up store path in %s ...", store)
+	log.Infof("setting up store path in %s ...", store)
 	// 0755 because it must be accessible by libvirt/qemu across a variety of configs
 	if err := os.MkdirAll(store, 0755); err != nil {
-		return errors.Wrap(err, "creating store")
+		return fmt.Errorf("creating store: %w", err)
 	}
 
-	log.Infof("Building disk image from %s", d.Boot2DockerURL)
-	if err = pkgdrivers.MakeDiskImage(d.BaseDriver, d.Boot2DockerURL, d.DiskSize); err != nil {
-		return errors.Wrap(err, "error creating disk")
+	log.Infof("building disk image from %s", d.Boot2DockerURL)
+	if err := common.MakeDiskImage(d.BaseDriver, d.Boot2DockerURL, d.DiskSize); err != nil {
+		return fmt.Errorf("creating disk: %w", err)
+	}
+
+	if d.ExtraDisks > 20 {
+		// Limiting the number of disks to 20 arbitrarily. If more disks are
+		// needed, the logical name generation has to changed to create them if
+		// the form hdaa, hdab, etc
+		return errors.New("cannot create more than 20 extra disks")
+	}
+	for i := 0; i < d.ExtraDisks; i++ {
+		diskpath := common.ExtraDiskPath(d.BaseDriver, i)
+		if err := common.CreateRawDisk(diskpath, d.DiskSize); err != nil {
+			return fmt.Errorf("creating extra disks: %w", err)
+		}
+		// Starting the logical names for the extra disks from hdd as the cdrom device is set to hdc.
+		// TODO: Enhance the domain template to use variable for the logical name of the main disk and the cdrom disk.
+		extraDisksXML, err := getExtraDiskXML(diskpath, fmt.Sprintf("hd%v", string(rune('d'+i))))
+		if err != nil {
+			return fmt.Errorf("creating extraDisk XML: %w", err)
+		}
+		d.ExtraDisksXML = append(d.ExtraDisksXML, extraDisksXML)
 	}
 
 	if err := ensureDirPermissions(store); err != nil {
 		log.Errorf("unable to ensure permissions on %s: %v", store, err)
 	}
 
-	log.Info("Creating domain...")
-	dom, err := d.createDomain()
+	log.Info("defining domain...")
+	dom, err := d.defineDomain()
 	if err != nil {
-		return errors.Wrap(err, "creating domain")
+		return fmt.Errorf("defining domain: %w", err)
 	}
 	defer func() {
-		if ferr := dom.Free(); ferr != nil {
-			err = ferr
+		if dom == nil {
+			log.Warnf("nil domain, cannot free")
+		} else if err := dom.Free(); err != nil {
+			log.Errorf("failed freeing %s domain: %v", d.MachineName, lvErr(err))
 		}
 	}()
-	return d.Start()
+
+	if err := d.Start(); err != nil {
+		return fmt.Errorf("starting domain: %w", err)
+	}
+
+	log.Infof("domain creation complete")
+	return nil
 }
 
 // ensureDirPermissions ensures that libvirt has access to access the image store directory
@@ -375,19 +402,22 @@ func ensureDirPermissions(store string) error {
 	// traverse upwards from /home/user/.minikube/machines to ensure
 	// that libvirt/qemu has execute access
 	for dir := store; dir != "/"; dir = filepath.Dir(dir) {
-		log.Debugf("Checking permissions on dir: %s", dir)
+		log.Debugf("checking permissions on dir: %s", dir)
+
 		s, err := os.Stat(dir)
 		if err != nil {
 			return err
 		}
+
 		owner := int(s.Sys().(*syscall.Stat_t).Uid)
 		if owner != os.Geteuid() {
-			log.Debugf("Skipping %s - not owner", dir)
+			log.Debugf("skipping %s - not owner", dir)
 			continue
 		}
+
 		mode := s.Mode()
 		if mode&0011 != 1 {
-			log.Infof("Setting executable bit set on %s (perms=%s)", dir, mode)
+			log.Infof("setting executable bit set on %s (perms=%s)", dir, mode)
 			mode |= 0011
 			if err := os.Chmod(dir, mode); err != nil {
 				return err
@@ -397,99 +427,128 @@ func ensureDirPermissions(store string) error {
 	return nil
 }
 
-// Stop a host gracefully
-func (d *Driver) Stop() (err error) {
+// Stop a host gracefully or forcefully otherwise.
+func (d *Driver) Stop() error {
+	log.Info("stopping domain...")
+
 	s, err := d.GetState()
 	if err != nil {
-		return errors.Wrap(err, "getting state of VM")
+		return fmt.Errorf("getting domain state: %w", err)
 	}
 
-	if s != state.Stopped {
-		dom, conn, err := d.getDomain()
-		defer func() {
-			if ferr := closeDomain(dom, conn); ferr != nil {
-				err = ferr
-			}
-		}()
-		if err != nil {
-			return errors.Wrap(err, "getting connection")
-		}
-
-		err = dom.Shutdown()
-		if err != nil {
-			return errors.Wrap(err, "stopping vm")
-		}
-
-		for i := 0; i < 60; i++ {
-			s, err := d.GetState()
-			if err != nil {
-				return errors.Wrap(err, "error getting state of VM")
-			}
-			if s == state.Stopped {
-				return nil
-			}
-			log.Infof("Waiting for machine to stop %d/%d", i, 60)
-			time.Sleep(1 * time.Second)
-		}
-
+	if s == state.Stopped {
+		log.Info("domain already stopped, nothing to do")
+		return nil
 	}
 
-	return fmt.Errorf("unable to stop vm, current state %q", s.String())
+	dom, conn, err := d.getDomain()
+	if err != nil {
+		return fmt.Errorf("getting domain: %w", err)
+	}
+	defer func() {
+		if err := closeDomain(dom, conn); err != nil {
+			log.Errorf("failed closing domain: %v", err)
+		}
+	}()
+
+	log.Info("gracefully shutting domain down...")
+
+	// ref: https://libvirt.org/html/libvirt-libvirt-domain.html#virDomainShutdownFlags
+	// note: "The order in which the hypervisor tries each shutdown method is undefined, and a hypervisor is not required to support all methods."
+	// so we skip "VIR_DOMAIN_SHUTDOWN_DEFAULT" - the "hypervisor choice" and use bitwise-OR of available virDomainShutdownFlagValues
+	// ref: https://libvirt.org/html/libvirt-libvirt-domain.html#virDomainShutdownFlagValues
+	// ref: https://bugzilla.redhat.com/show_bug.cgi?id=1744156
+	//   "libvirt's QEMU driver, used to manage KVM guests, only supports the 'agent' and 'acpi' reboot/shutdown modes because those are the ones QEMU itself supports"
+	// note: we don't install/use agent
+	if err := dom.ShutdownFlags(libvirt.DOMAIN_SHUTDOWN_ACPI_POWER_BTN); err != nil {
+		log.Warnf("setting virDomainShutdownFlags failed, will continue anyway with defaults: %v", err)
+		if err := dom.ShutdownFlags(libvirt.DOMAIN_SHUTDOWN_DEFAULT); err != nil {
+			log.Errorf("resetting virDomainShutdownFlags to defaults failed, will continue anyway: %v", err)
+		}
+	}
+
+	if err := dom.Shutdown(); err != nil {
+		return fmt.Errorf("gracefully shutting domain down: %w", err)
+	}
+
+	if err = d.waitForDomainState(state.Stopped, 90*time.Second); err == nil {
+		log.Info("domain gracefully shut down")
+		return nil
+	}
+
+	log.Warn("failed graceful domain shut down, will try to force-stop")
+
+	if err := d.Kill(); err != nil {
+		return fmt.Errorf("force-stopping domain request failed: %w", err)
+	}
+
+	if err = d.waitForDomainState(state.Stopped, 30*time.Second); err == nil {
+		log.Info("domain force-stopped")
+		return nil
+	}
+	return fmt.Errorf("unable to stop domain: %w", err)
 }
 
 // Remove a host
 func (d *Driver) Remove() error {
-	log.Debug("Removing machine...")
+	log.Info("removing KVM machine...")
+
 	conn, err := getConnection(d.ConnectionURI)
 	if err != nil {
-		return errors.Wrap(err, "getting connection")
+		return fmt.Errorf("failed opening libvirt connection: %w", err)
 	}
-	defer conn.Close()
+	defer func() {
+		if _, err := conn.Close(); err != nil {
+			log.Errorf("failed closing libvirt connection: %v", lvErr(err))
+		}
+	}()
 
 	// Tear down network if it exists and is not in use by another minikube instance
-	log.Debug("Trying to delete the networks (if possible)")
+	log.Info("deleting networks...")
 	if err := d.deleteNetwork(); err != nil {
-		log.Warnf("Deleting of networks failed: %v", err)
+		log.Errorf("deleting networks failed, will continue anyway: %v", err)
 	} else {
-		log.Info("Successfully deleted networks")
+		log.Info("successfully deleted networks")
 	}
 
 	// Tear down the domain now
-	log.Debug("Checking if the domain needs to be deleted")
+	log.Info("checking if the domain needs to be deleted")
 	dom, err := conn.LookupDomainByName(d.MachineName)
 	if err != nil {
-		log.Warnf("Domain %s does not exist, nothing to clean up...", d.MachineName)
+		log.Warnf("domain %s does not exist, nothing to clean up...", d.MachineName)
 		return nil
 	}
 
-	log.Infof("Domain %s exists, removing...", d.MachineName)
+	log.Infof("domain %s exists, removing...", d.MachineName)
 	if err := d.destroyRunningDomain(dom); err != nil {
-		return errors.Wrap(err, "destroying running domain")
+		return fmt.Errorf("destroying running domain: %w", err)
 	}
 
 	if err := d.undefineDomain(conn, dom); err != nil {
-		return errors.Wrap(err, "undefine domain")
+		return fmt.Errorf("undefining domain: %w", err)
 	}
 
-	log.Info("Removing static IP address...")
+	log.Info("removing static IP address...")
 	if err := delStaticIP(conn, d.PrivateNetwork, "", "", d.IPAddress); err != nil {
-		log.Warnf("failed removing static IP %s for host %s, will continue anyway: %v", d.IPAddress, d.MachineName, err)
+		log.Warnf("failed removing static IP address %s for domain %s, will continue anyway: %v", d.IPAddress, d.MachineName, err)
 	} else {
-		log.Info("Removed static IP address")
+		log.Infof("removed static IP address %s for domain %s", d.IPAddress, d.MachineName)
 	}
+
+	log.Infof("KVM machine removal complete")
 
 	return nil
 }
 
 func (d *Driver) destroyRunningDomain(dom *libvirt.Domain) error {
-	state, _, err := dom.GetState()
+	lvs, _, err := dom.GetState()
 	if err != nil {
-		return errors.Wrap(err, "getting domain state")
+		return fmt.Errorf("getting domain state: %w", err)
 	}
 
 	// if the domain is not running, we don't destroy it
-	if state != libvirt.DOMAIN_RUNNING {
-		log.Warnf("Domain %s already destroyed, skipping...", d.MachineName)
+	if machineState(lvs) != state.Running {
+		log.Warnf("domain %s already destroyed, skipping...", d.MachineName)
 		return nil
 	}
 
@@ -499,7 +558,7 @@ func (d *Driver) destroyRunningDomain(dom *libvirt.Domain) error {
 func (d *Driver) undefineDomain(conn *libvirt.Connect, dom *libvirt.Domain) error {
 	definedDomains, err := conn.ListDefinedDomains()
 	if err != nil {
-		return errors.Wrap(err, "list defined domains")
+		return fmt.Errorf("listing domains: %w", err)
 	}
 
 	var found bool
@@ -511,11 +570,11 @@ func (d *Driver) undefineDomain(conn *libvirt.Connect, dom *libvirt.Domain) erro
 	}
 
 	if !found {
-		log.Warnf("Domain %s not defined, skipping undefine...", d.MachineName)
+		log.Warnf("domain %s not defined, skipping undefine...", d.MachineName)
 		return nil
 	}
 
-	return dom.Undefine()
+	return dom.UndefineFlags(libvirt.DOMAIN_UNDEFINE_KEEP_NVRAM)
 }
 
 // lvErr will return libvirt Error struct containing specific libvirt error code, domain, message and level

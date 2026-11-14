@@ -17,26 +17,34 @@
 # For systemd + docker configuration used below, see the following references:
 # https://systemd.io/CONTAINER_INTERFACE/
 
+# this ARG needs to be global to use it in `FROM` & is updated for new versions of debian:trixie-slim-*
+ARG KICBASE_IMAGE="debian:trixie-20261104-slim"
+# start from debian 13, this image is reasonably small as a starting point
+# for a kubernetes node image, it doesn't contain much we don't need.
+FROM ${KICBASE_IMAGE} AS kicbase
 
-# multi-tage docker build so we can build auto-pause for arm64
-FROM golang:1.16
-WORKDIR /src
-# becaue auto-pause binary depends on minikube's code we need to pass the whole source code as the context
-ADD . .
-RUN cd ./cmd/auto-pause/ && go build 
-
-# start from ubuntu 20.04, this image is reasonably small as a starting point
-# for a kubernetes node image, it doesn't contain much we don't need
-FROM ubuntu:focal-20210401
-
-ARG BUILDKIT_VERSION="v0.8.2"
+ARG BUILDKIT_VERSION="v0.34.2"
+ARG CRIO_VERSION="v1.35"
+ARG CRICTL_VERSION="v1.35.0"
+ARG CRI_DOCKERD_VERSION="v0.4.10"
+ARG CRI_DOCKERD_COMMIT="2527b04c311a8eddd978a193be9a12a878f4a015"
+ARG CNI_PLUGINS_VERSION="v1.9.1"
+ARG TARGETARCH
+ARG NERDCTL_VERSION="2.4.1"
+ARG NERDCTLD_VERSION="0.7.0"
 
 # copy in static files (configs, scripts)
-COPY deploy/kicbase/10-network-security.conf /etc/sysctl.d/10-network-security.conf
-COPY deploy/kicbase/11-tcp-mtu-probing.conf /etc/sysctl.d/11-tcp-mtu-probing.conf
-COPY deploy/kicbase/clean-install /usr/local/bin/clean-install
-COPY deploy/kicbase/entrypoint /usr/local/bin/entrypoint
-COPY --from=0 /src/cmd/auto-pause/auto-pause /bin/auto-pause
+COPY 10-network-security.conf /etc/sysctl.d/10-network-security.conf
+COPY 11-tcp-mtu-probing.conf /etc/sysctl.d/11-tcp-mtu-probing.conf
+COPY 02-crio.conf /etc/crio/crio.conf.d/02-crio.conf
+COPY containerd.toml /etc/containerd/config.toml
+COPY containerd_docker_io_hosts.toml /etc/containerd/certs.d/docker.io/hosts.toml
+COPY clean-install /usr/local/bin/clean-install
+COPY entrypoint /usr/local/bin/entrypoint
+COPY CHANGELOG ./CHANGELOG
+COPY nerdctld/nerdctl.socket /usr/local/lib/systemd/system/nerdctl.socket
+COPY nerdctld/nerdctl.service /usr/local/lib/systemd/system/nerdctl.service
+COPY auto-pause-${TARGETARCH} /bin/auto-pause
 
 # Install dependencies, first from apt, then from release tarballs.
 # NOTE: we use one RUN to minimize layers.
@@ -65,7 +73,7 @@ RUN echo "Ensuring scripts are executable ..." \
     && chmod +x /usr/local/bin/clean-install /usr/local/bin/entrypoint \
  && echo "Installing Packages ..." \
     && DEBIAN_FRONTEND=noninteractive clean-install \
-      systemd \
+      systemd dbus \
       conntrack iptables iproute2 ethtool socat util-linux mount ebtables udev kmod \
       libseccomp2 pigz \
       bash ca-certificates curl rsync \
@@ -79,24 +87,19 @@ RUN echo "Ensuring scripts are executable ..." \
     && rm -f /lib/systemd/system/sockets.target.wants/*initctl* \
     && rm -f /lib/systemd/system/basic.target.wants/* \
     && echo "ReadKMsg=no" >> /etc/systemd/journald.conf \
-    && ln -s "$(which systemd)" /sbin/init \
+    && ln -sf /usr/lib/systemd/systemd /sbin/init \
  && echo "Ensuring /etc/kubernetes/manifests" \
     && mkdir -p /etc/kubernetes/manifests \
  && echo "Adjusting systemd-tmpfiles timer" \
     && sed -i /usr/lib/systemd/system/systemd-tmpfiles-clean.timer -e 's#OnBootSec=.*#OnBootSec=1min#' \
  && echo "Disabling udev" \
     && systemctl disable udev.service \
+ && echo "Masking systemd-binfmt to prevent host config corruption (covers all formats: python, qemu, rosetta, etc) - issue #17700" \
+    && systemctl mask systemd-binfmt.service \
  && echo "Modifying /etc/nsswitch.conf to prefer hosts" \
     && sed -i /etc/nsswitch.conf -re 's#^(hosts:\s*).*#\1dns files#'
 
-# tell systemd that it is in docker (it will check for the container env)
-# https://systemd.io/CONTAINER_INTERFACE/
-ENV container docker
-# systemd exits on SIGRTMIN+3, not SIGTERM (which re-executes it)
-# https://bugzilla.redhat.com/show_bug.cgi?id=1201657
-STOPSIGNAL SIGRTMIN+3
-# NOTE: this is *only* for documentation, the entrypoint is overridden later
-ENTRYPOINT [ "/usr/local/bin/entrypoint", "/sbin/init" ]
+
 
 ARG COMMIT_SHA
 # using base image created by kind https://github.com/kubernetes-sigs/kind/blob/b6bc1125/images/base/Dockerfile
@@ -105,51 +108,93 @@ ARG COMMIT_SHA
 # could be changed to any debian that can run systemd
 USER root
 
+# Install cri-dockerd from official GitHub releases
+RUN export VERSION=$(echo "${CRI_DOCKERD_VERSION}" | sed 's/^v//') && \
+    #TODO: add other archs after this PR is merged https://github.com/Mirantis/cri-dockerd/pull/556
+	if [ "${TARGETARCH}" = "amd64" ] || [ "${TARGETARCH}" = "arm64" ]; then \
+		echo "Installing cri-dockerd ${CRI_DOCKERD_VERSION} for ${TARGETARCH}" && \
+		curl -L "https://github.com/Mirantis/cri-dockerd/releases/download/${CRI_DOCKERD_VERSION}/cri-dockerd-${VERSION}.${TARGETARCH}.tgz" -o /tmp/cri-dockerd.tgz && \
+		tar -C /tmp -xzvf /tmp/cri-dockerd.tgz && \
+		mv /tmp/cri-dockerd/cri-dockerd /usr/bin/cri-dockerd && \
+		chmod +x /usr/bin/cri-dockerd && \
+		rm -rf /tmp/cri-dockerd /tmp/cri-dockerd.tgz && \
+		curl -L "https://raw.githubusercontent.com/Mirantis/cri-dockerd/${CRI_DOCKERD_VERSION}/packaging/systemd/cri-docker.socket" -o /usr/lib/systemd/system/cri-docker.socket && \
+		curl -L "https://raw.githubusercontent.com/Mirantis/cri-dockerd/${CRI_DOCKERD_VERSION}/packaging/systemd/cri-docker.service" -o /usr/lib/systemd/system/cri-docker.service; \
+	else \
+		echo "WARNING: cri-dockerd is not pre-compiled for ${TARGETARCH}, skipping installation."; \
+	fi
+
 # install system requirements from the regular distro repositories
 RUN clean-install \
     lz4 \
-    gnupg \ 
+    gnupg \
     sudo \
     openssh-server \
-    dnsutils \
-    # libglib2.0-0 is required for conmon, which is required for podman
-    libglib2.0-0
+    dnsutils
+
+# Add support for rsa1 in sshd
+# modern debian-based OSs dont support rsa1 by default, so we need to enable it to support older ssh clients
+# TODO: remove after https://github.com/kubernetes/minikube/issues/21543 is solved
+RUN cat <<EOF >> /etc/ssh/sshd_config
+PubkeyAcceptedAlgorithms +ssh-rsa
+HostkeyAlgorithms +ssh-rsa
+PubkeyAuthentication yes
+PasswordAuthentication no
+EOF
+
+# Install nerdctl and nerdctld
+RUN export ARCH=$(dpkg --print-architecture | sed 's/ppc64el/ppc64le/') && \
+    echo "Installing nerdctl and nerdctld ..." &&\
+    addgroup --system nerdctl &&\
+    mkdir -p /etc/systemd/system/nerdctl.socket.d && \
+    printf "[Socket]\nSocketMode=0660\nSocketGroup=nerdctl\n" \
+           > /etc/systemd/system/nerdctl.socket.d/override.conf && \
+    mkdir -p /etc/systemd/system/nerdctl.service.d && \
+    printf "[Service]\nEnvironment=CONTAINERD_NAMESPACE=k8s.io\n" \
+           > /etc/systemd/system/nerdctl.service.d/override.conf && \
+    curl -L --retry 5 --output /tmp/nerdctl.tgz "https://github.com/containerd/nerdctl/releases/download/v${NERDCTL_VERSION}/nerdctl-${NERDCTL_VERSION}-linux-$ARCH.tar.gz" &&\
+    tar -C /usr/local/bin -xzvf /tmp/nerdctl.tgz &&\
+    curl -L --retry 5 --output /tmp/nerdctld.tgz "https://github.com/afbjorklund/nerdctld/releases/download/v${NERDCTLD_VERSION}/nerdctld-${NERDCTLD_VERSION}-linux-$ARCH.tar.gz" &&\
+    tar -C /usr/local/bin -xzvf /tmp/nerdctld.tgz &&\
+    chmod 755 /usr/local/bin/nerdctl &&\
+    chmod 755 /usr/local/bin/nerdctld
 
 # install docker
-RUN sh -c "echo 'deb https://download.docker.com/linux/ubuntu focal stable' > /etc/apt/sources.list.d/docker.list" && \
-    curl -L https://download.docker.com/linux/ubuntu/gpg -o docker.key && \
-    apt-key add - < docker.key && \
-    clean-install docker-ce docker-ce-cli containerd.io
+## ref: https://docs.docker.com/engine/install/debian/#install-using-the-repository
+RUN install -m 0755 -d /etc/apt/keyrings \
+    && curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc \
+    && chmod a+r /etc/apt/keyrings/docker.asc \
+    && echo \
+    "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian \
+    $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | \
+    tee /etc/apt/sources.list.d/docker.list > /dev/null \
+    && clean-install docker-ce docker-ce-cli containerd.io docker-buildx-plugin
+
+# Set ulimit for containerd to match docker's default-ulimit setting
+# This ensures consistent file descriptor limits (1048576) across container runtimes
+RUN sed -i '/^\[Service\]/a LimitNOFILE=1048576' /lib/systemd/system/containerd.service
 
 # install buildkit
-RUN export ARCH=$(dpkg --print-architecture | sed 's/ppc64el/ppc64le/' | sed 's/armhf/arm-v7/') \
+RUN export ARCH=$(dpkg --print-architecture | sed 's/ppc64el/ppc64le/') \
  && echo "Installing buildkit ..." \
+    && addgroup --system buildkit \
     && export BUILDKIT_BASE_URL="https://github.com/moby/buildkit/releases/download/${BUILDKIT_VERSION}" \
     && curl -sSL --retry 5 --output /tmp/buildkit.tgz "${BUILDKIT_BASE_URL}/buildkit-${BUILDKIT_VERSION}.linux-${ARCH}.tar.gz" \
     && tar -C /usr/local -xzvf /tmp/buildkit.tgz \
     && rm -rf /tmp/buildkit.tgz \
+    && mkdir -p /usr/local/lib/systemd/system \
+    && curl -L --retry 5 --output /usr/local/lib/systemd/system/buildkit.service "https://raw.githubusercontent.com/moby/buildkit/${BUILDKIT_VERSION}/examples/systemd/system/buildkit.service" \
+    && curl -L --retry 5 --output /usr/local/lib/systemd/system/buildkit.socket "https://raw.githubusercontent.com/moby/buildkit/${BUILDKIT_VERSION}/examples/systemd/system/buildkit.socket" \
+    && mkdir -p /etc/buildkit \
+    && echo "[worker.oci]\n  enabled = false\n[worker.containerd]\n  enabled = true\n  namespace = \"k8s.io\"" > /etc/buildkit/buildkitd.toml \
     && chmod 755 /usr/local/bin/buildctl \
     && chmod 755 /usr/local/bin/buildkit-runc \
     && chmod 755 /usr/local/bin/buildkit-qemu-* \
-    && chmod 755 /usr/local/bin/buildkitd
-
-# Install cri-o/podman dependencies:
-RUN sh -c "echo 'deb https://download.opensuse.org/repositories/devel:/kubic:/libcontainers:/stable/xUbuntu_20.04/ /' > /etc/apt/sources.list.d/devel:kubic:libcontainers:stable.list" && \
-    curl -LO https://download.opensuse.org/repositories/devel:kubic:libcontainers:stable/xUbuntu_20.04/Release.key && \
-    apt-key add - < Release.key && \
-    clean-install containers-common catatonit conmon containernetworking-plugins cri-tools podman-plugins crun
-
-# install cri-o based on https://github.com/cri-o/cri-o/blob/release-1.20/README.md#installing-cri-o
-RUN sh -c "echo 'deb https://download.opensuse.org/repositories/devel:/kubic:/libcontainers:/stable:/cri-o:/1.20/xUbuntu_20.04/ /' > /etc/apt/sources.list.d/devel:kubic:libcontainers:stable:cri-o:1.20.list" && \
-    curl -LO https://download.opensuse.org/repositories/devel:/kubic:/libcontainers:/stable:/cri-o:/1.20/xUbuntu_20.04/Release.key && \
-    apt-key add - < Release.key && \
-    clean-install cri-o cri-o-runc
+    && chmod 755 /usr/local/bin/buildkitd \
+    && systemctl enable buildkit.socket
 
 # install podman
-RUN sh -c "echo 'deb http://download.opensuse.org/repositories/devel:/kubic:/libcontainers:/stable/xUbuntu_20.04/ /' > /etc/apt/sources.list.d/devel:kubic:libcontainers:stable.list" && \
-    curl -LO https://download.opensuse.org/repositories/devel:kubic:libcontainers:stable/xUbuntu_20.04/Release.key && \
-    apt-key add - < Release.key && \
-    clean-install podman && \
+RUN clean-install podman catatonit crun && \
     addgroup --system podman && \
     mkdir -p /etc/systemd/system/podman.socket.d && \
     printf "[Socket]\nSocketMode=0660\nSocketUser=root\nSocketGroup=podman\n" \
@@ -158,41 +203,100 @@ RUN sh -c "echo 'deb http://download.opensuse.org/repositories/devel:/kubic:/lib
     echo "d /run/podman 0770 root podman" > /etc/tmpfiles.d/podman.conf && \
     systemd-tmpfiles --create
 
+ # install crictl
+RUN export ARCH=$(dpkg --print-architecture) && \
+    case "$ARCH" in \
+      amd64) CRICTL_ARCH="amd64" ;; \
+      arm64) CRICTL_ARCH="arm64" ;; \
+      ppc64el) CRICTL_ARCH="ppc64le" ;; \
+      s390x) CRICTL_ARCH="s390x" ;; \
+      *) echo "Unsupported architecture for crictl: $ARCH" && exit 1 ;; \
+    esac && \
+    curl -fsSL --retry 5 --output /tmp/crictl.tgz "https://github.com/kubernetes-sigs/cri-tools/releases/download/${CRICTL_VERSION}/crictl-${CRICTL_VERSION}-linux-${CRICTL_ARCH}.tar.gz" && \
+    tar -C /usr/local/bin -xzvf /tmp/crictl.tgz && \
+    rm -f /tmp/crictl.tgz && \
+    chmod +x /usr/local/bin/crictl && \
+    if [ -f /usr/local/bin/critest ]; then chmod +x /usr/local/bin/critest; fi
+# install containernetworking-plugins
+RUN export ARCH=$(dpkg --print-architecture | sed 's/ppc64el/ppc64le/') && \
+    curl -LO "https://github.com/containernetworking/plugins/releases/download/${CNI_PLUGINS_VERSION}/cni-plugins-linux-$ARCH-${CNI_PLUGINS_VERSION}.tgz" && \
+    mkdir -p /opt/cni/bin && \
+    tar -xf "cni-plugins-linux-$ARCH-${CNI_PLUGINS_VERSION}.tgz" -C /opt/cni/bin && \
+    rm "cni-plugins-linux-$ARCH-${CNI_PLUGINS_VERSION}.tgz"
+
+# install cri-o from the OBS repositories
+RUN export ARCH=$(dpkg --print-architecture | sed 's/ppc64el/ppc64le/') && \
+    if [ "$ARCH" != "ppc64le" ]; then \
+        mkdir -p /etc/apt/sources.list.d /etc/apt/trusted.gpg.d && \
+        echo 'deb http://download.opensuse.org/repositories/devel:/kubic:/libcontainers:/stable/Debian_12/ /' \
+            > /etc/apt/sources.list.d/devel:kubic:libcontainers:stable.list && \
+        curl -fsSL https://download.opensuse.org/repositories/devel:/kubic:/libcontainers:/stable/Debian_12/Release.key \
+            | gpg --dearmor --yes -o /etc/apt/trusted.gpg.d/devel_kubic_libcontainers_stable.gpg && \
+        echo "deb http://download.opensuse.org/repositories/isv:/cri-o:/stable:/${CRIO_VERSION}:/build/deb/ /" \
+            > "/etc/apt/sources.list.d/isv:cri-o:stable:${CRIO_VERSION}:build.list" && \
+        curl -fsSL "https://download.opensuse.org/repositories/isv:cri-o:stable:${CRIO_VERSION}:build/deb/Release.key" \
+            | gpg --dearmor --yes -o "/etc/apt/trusted.gpg.d/isv_cri-o_stable_${CRIO_VERSION}_build.gpg" && \
+        clean-install cri-o; \
+    fi
+
+# install NVIDIA container toolkit
+RUN export ARCH=$(dpkg --print-architecture) && \
+    if [ "$ARCH" = 'amd64' ] || [ "$ARCH" = 'arm64' ] || [ "$ARCH" = 'ppc64el' ]; then \
+    curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | sudo gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg && \
+    curl -s -L https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list | \
+    sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' | \
+    sudo tee /etc/apt/sources.list.d/nvidia-container-toolkit.list && \
+    clean-install nvidia-container-toolkit; fi
+
+# install helm
+ARG HELM_VERSION="v4.2.3"
+RUN export ARCH=$(dpkg --print-architecture | sed 's/ppc64el/ppc64le/') && \
+    mkdir /tmp/helm && \
+    curl -fsSL --retry 5 -o /tmp/helm.tgz "https://get.helm.sh/helm-${HELM_VERSION}-linux-${ARCH}.tar.gz" && \
+    tar --strip-components=1 -xzf /tmp/helm.tgz -C /tmp/helm && \
+    install -D -m 0755 /tmp/helm/helm /usr/bin/helm && \
+    rm -rf /tmp/helm /tmp/helm.tgz
+    
+# install version.json
+ARG VERSION_JSON
+RUN echo "${VERSION_JSON}" > /version.json
+
 # automount service
-COPY deploy/kicbase/automount/minikube-automount /usr/sbin/minikube-automount
-COPY deploy/kicbase/automount/minikube-automount.service /usr/lib/systemd/system/minikube-automount.service
+COPY automount/minikube-automount /usr/sbin/minikube-automount
+COPY automount/minikube-automount.service /usr/lib/systemd/system/minikube-automount.service
 RUN ln -fs /usr/lib/systemd/system/minikube-automount.service \
     /etc/systemd/system/multi-user.target.wants/minikube-automount.service
 
 # scheduled stop service
-COPY deploy/kicbase/scheduled-stop/minikube-scheduled-stop /var/lib/minikube/scheduled-stop/minikube-scheduled-stop
-COPY deploy/kicbase/scheduled-stop/minikube-scheduled-stop.service /usr/lib/systemd/system/minikube-scheduled-stop.service
+COPY scheduled-stop/minikube-scheduled-stop /var/lib/minikube/scheduled-stop/minikube-scheduled-stop
+COPY scheduled-stop/minikube-scheduled-stop.service /usr/lib/systemd/system/minikube-scheduled-stop.service
 RUN  chmod +x /var/lib/minikube/scheduled-stop/minikube-scheduled-stop
 
-# disable non-docker runtimes by default
-RUN systemctl disable containerd && systemctl disable crio && rm /etc/crictl.yaml
+# disable non-docker runtimes by default (since cri-dockerd is default in minikube)
+RUN systemctl disable containerd
+# disable crio for archs that support it
+RUN export ARCH=$(dpkg --print-architecture | sed 's/ppc64el/ppc64le/') && \
+    if [ "$ARCH" != "ppc64le" ]; then systemctl disable crio && rm -f /etc/crictl.yaml; fi
+# enable podman socket on archs that support it
+RUN export ARCH=$(dpkg --print-architecture | sed 's/ppc64el/ppc64le/') && if [ "$ARCH" != "ppc64le" ]; then systemctl enable podman.socket; fi
 # enable docker which is default
-RUN systemctl enable docker.service && systemctl enable podman.socket
-# making SSH work for docker container 
-# based on https://github.com/rastasheep/ubuntu-sshd/blob/master/18.04/Dockerfile
-RUN mkdir /var/run/sshd
-RUN echo 'root:root' |chpasswd
-RUN sed -ri 's/^#?PermitRootLogin\s+.*/PermitRootLogin yes/' /etc/ssh/sshd_config
-RUN sed -ri 's/UsePAM yes/#UsePAM yes/g' /etc/ssh/sshd_config
-
+RUN systemctl enable docker.service
 # minikube relies on /etc/hosts for control-plane discovery. This prevents nefarious DNS servers from breaking it.
 RUN sed -ri 's/dns files/files dns/g' /etc/nsswitch.conf
 
-# metacopy breaks crio on certain OS and isn't necessary for minikube
-# https://github.com/kubernetes/minikube/issues/10520
-RUN sed -ri 's/mountopt = "nodev,metacopy=on"/mountopt = "nodev"/g' /etc/containers/storage.conf
-
 EXPOSE 22
 # create docker user for minikube ssh. to match VM using "docker" as username
-RUN adduser --ingroup docker --disabled-password --gecos '' docker 
-RUN adduser docker sudo
-RUN adduser docker podman
-RUN echo '%sudo ALL=(ALL) NOPASSWD:ALL' >> /etc/sudoers
+# Ensure 'docker' group exists; create a 'docker' user with a shell
+## ref: https://docs.docker.com/engine/install/linux-postinstall/
+RUN groupadd -f docker \
+    && useradd -m -s /bin/bash -g docker -G sudo docker
+# Ensure the account is usable for key-only SSH - unlock the account, and disable password
+RUN usermod -p '*' docker && passwd -u docker && passwd -d docker
+RUN echo '%sudo ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/20-passwordless-sudo \
+    && chmod 0440 /etc/sudoers.d/20-passwordless-sudo
+RUN export ARCH=$(dpkg --print-architecture | sed 's/ppc64el/ppc64le/') && if [ "$ARCH" != "ppc64le" ]; then adduser docker podman; fi
+RUN adduser docker nerdctl
+RUN adduser docker buildkit
 USER docker
 RUN mkdir /home/docker/.ssh
 USER root
@@ -203,5 +307,24 @@ RUN mkdir -p /kind
 RUN rm -rf \
   /usr/share/doc/* \
   /usr/share/man/* \
-  /usr/share/local/* 
+  /usr/share/local/*
+
+# Per https://systemd.io/CONTAINER_INTERFACE/, /etc/machine-id must be present
+# but empty in a container image so it is freshly initialized on each boot.
+# Remove /var/lib/dbus/machine-id so that systemd-machine-id-setup cannot fall
+# back to a baked-in value, which would make every container share the same ID.
+RUN truncate -s 0 /etc/machine-id && rm -f /var/lib/dbus/machine-id
 RUN echo "kic! Build: ${COMMIT_SHA} Time :$(date)" > "/kic.txt"
+
+# squash all layers into one
+FROM scratch
+COPY --from=kicbase / /
+EXPOSE 22
+# tell systemd that it is in docker (it will check for the container env)
+# https://systemd.io/CONTAINER_INTERFACE/
+ENV container=docker
+# systemd exits on SIGRTMIN+3, not SIGTERM (which re-executes it)
+# https://bugzilla.redhat.com/show_bug.cgi?id=1201657
+STOPSIGNAL SIGRTMIN+3
+# NOTE: this is *only* for documentation, the entrypoint is overridden later
+ENTRYPOINT [ "/usr/local/bin/entrypoint", "/sbin/init" ]

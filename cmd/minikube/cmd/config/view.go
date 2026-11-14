@@ -40,8 +40,10 @@ type ViewTemplate struct {
 var configViewCmd = &cobra.Command{
 	Use:   "view",
 	Short: "Display values currently set in the minikube config file",
-	Long:  "Display values currently set in the minikube config file.",
-	Run: func(cmd *cobra.Command, args []string) {
+	Long: `Display values currently set in the minikube config file.
+	The output format can be customized using the --format flag, which accepts a Go template. 
+	The config file is typically located at "~/.minikube/config/config.json".`,
+	Run: func(_ *cobra.Command, _ []string) {
 		err := View()
 		if err != nil {
 			exit.Error(reason.InternalConfigView, "config view failed", err)
@@ -51,8 +53,8 @@ var configViewCmd = &cobra.Command{
 
 func init() {
 	configViewCmd.Flags().StringVar(&viewFormat, "format", defaultConfigViewFormat,
-		`Go template format string for the config view output.  The format for Go templates can be found here: https://golang.org/pkg/text/template/
-For the list of accessible variables for the template, see the struct values here: https://godoc.org/k8s.io/minikube/cmd/minikube/cmd/config#ConfigViewTemplate`)
+		`Go template format string for the config view output.  The format for Go templates can be found here: https://pkg.go.dev/text/template
+For the list of accessible variables for the template, see the struct values here: https://pkg.go.dev/k8s.io/minikube/cmd/minikube/cmd/config#ConfigViewTemplate`)
 	ConfigCmd.AddCommand(configViewCmd)
 }
 

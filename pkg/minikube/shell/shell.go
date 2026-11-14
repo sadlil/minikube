@@ -14,9 +14,6 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Part of this code is heavily inspired/copied by the following file:
-// github.com/docker/machine/commands/env.go
-
 package shell
 
 import (
@@ -26,7 +23,7 @@ import (
 	"runtime"
 	"text/template"
 
-	"github.com/docker/machine/libmachine/shell"
+	"k8s.io/minikube/pkg/libmachine/shell"
 
 	"k8s.io/minikube/pkg/minikube/constants"
 )
@@ -81,7 +78,7 @@ var shellConfigMap = map[string]shellData{
 		unsetDelimiter: "",
 		usageHint: func(s ...interface{}) string {
 			return fmt.Sprintf(`# %s
-# & %s | Invoke-Expression
+# & %s --shell powershell | Invoke-Expression
 `, s...)
 		},
 	},
@@ -94,7 +91,7 @@ var shellConfigMap = map[string]shellData{
 		unsetDelimiter: "=",
 		usageHint: func(s ...interface{}) string {
 			return fmt.Sprintf(`REM %s
-REM @FOR /f "tokens=*" %%i IN ('%s') DO @%%i
+REM @FOR /f "tokens=*" %%i IN ('%s --shell cmd') DO @%%i
 `, s...)
 		},
 	},
@@ -125,6 +122,17 @@ REM @FOR /f "tokens=*" %%i IN ('%s') DO @%%i
 `, s...)
 		},
 	},
+	"tcsh": {
+		prefix:         "setenv ",
+		suffix:         "\";\n",
+		delimiter:      " \"",
+		unsetPrefix:    "unsetenv ",
+		unsetSuffix:    ";\n",
+		unsetDelimiter: "",
+		usageHint: func(s ...interface{}) string {
+			return fmt.Sprintf("\n: \"%s\"\n: eval `%s`\n", s...)
+		},
+	},
 	"none": {
 		prefix:         "",
 		suffix:         "\n",
@@ -132,14 +140,14 @@ REM @FOR /f "tokens=*" %%i IN ('%s') DO @%%i
 		unsetPrefix:    "",
 		unsetSuffix:    "\n",
 		unsetDelimiter: "",
-		usageHint: func(s ...interface{}) string {
+		usageHint: func(_ ...interface{}) string {
 			return ""
 		},
 	},
 }
 
 var defaultSh = "bash"
-var defaultShell shellData = shellConfigMap[defaultSh]
+var defaultShell = shellConfigMap[defaultSh]
 
 var (
 	// ForceShell forces a shell name
@@ -157,11 +165,11 @@ func Detect() (string, error) {
 }
 
 func (c EnvConfig) getShell() shellData {
-	shell, ok := shellConfigMap[c.Shell]
+	shellData, ok := shellConfigMap[c.Shell]
 	if !ok {
-		shell = defaultShell
+		shellData = defaultShell
 	}
-	return shell
+	return shellData
 }
 
 func generateUsageHint(ec EnvConfig, usgPlz, usgCmd string) string {
@@ -185,7 +193,7 @@ type EnvConfig struct {
 }
 
 // SetScript writes out a shell-compatible set script
-func SetScript(ec EnvConfig, w io.Writer, envTmpl string, data interface{}) error {
+func SetScript(w io.Writer, envTmpl string, data interface{}) error {
 	tmpl := template.Must(template.New("envConfig").Parse(envTmpl))
 	return tmpl.Execute(w, data)
 }

@@ -17,6 +17,7 @@ limitations under the License.
 package download
 
 import (
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -25,9 +26,9 @@ import (
 	"time"
 
 	"github.com/hashicorp/go-getter"
-	"github.com/juju/mutex"
-	"github.com/pkg/errors"
+
 	"k8s.io/klog/v2"
+	"k8s.io/minikube/pkg/minikube/detect"
 	"k8s.io/minikube/pkg/minikube/out"
 	"k8s.io/minikube/pkg/minikube/style"
 	"k8s.io/minikube/pkg/util/lock"
@@ -35,24 +36,41 @@ import (
 
 var (
 	// DownloadMock is called instead of the download implementation if not nil.
-	DownloadMock func(src, dst string) error = nil
-	checkCache                               = os.Stat
+	DownloadMock func(src, dst string) error
+	checkCache   = os.Stat
+
+	aliyunMirror = "kubernetes.oss-cn-hangzhou.aliyuncs.com"
+	downloadHost = "storage.googleapis.com"
+
+	releaseHost = "dl.k8s.io"
+	releasePath = ""
 )
 
+// SetAliyunMirror set the download host for Aliyun mirror
+func SetAliyunMirror() {
+	downloadHost = aliyunMirror
+
+	releaseHost = downloadHost
+	releasePath = "/kubernetes-release"
+}
+
 // CreateDstDownloadMock is the default mock implementation of download.
-func CreateDstDownloadMock(src, dst string) error {
-	if err := os.MkdirAll(filepath.Dir(dst), 0755); err != nil {
-		return errors.Wrap(err, "mkdir")
+func CreateDstDownloadMock(_, dst string) error {
+	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		return fmt.Errorf("mkdir: %w", err)
 	}
 
-	_, err := os.Create(dst)
-	return err
+	f, err := os.Create(dst)
+	if err != nil {
+		return err
+	}
+	return f.Close()
 }
 
 // download is a well-configured atomic download function
-func download(src string, dst string) error {
+func download(src, dst string, options ...getter.ClientOption) error {
 	var clientOptions []getter.ClientOption
-	if out.IsTerminal(os.Stdout) {
+	if out.IsTerminal(os.Stdout) && !detect.GithubActionRunner() {
 		progress := getter.WithProgress(DefaultProgressBar)
 		if out.JSON {
 			progress = getter.WithProgress(DefaultJSONOutput)
@@ -61,6 +79,7 @@ func download(src string, dst string) error {
 	} else {
 		clientOptions = []getter.ClientOption{}
 	}
+	clientOptions = append(clientOptions, options...)
 	tmpDst := dst + ".download"
 	client := &getter.Client{
 		Src:     src,
@@ -76,7 +95,7 @@ func download(src string, dst string) error {
 	}
 
 	if err := os.MkdirAll(filepath.Dir(dst), 0755); err != nil {
-		return errors.Wrap(err, "mkdir")
+		return fmt.Errorf("mkdir: %w", err)
 	}
 
 	if DownloadMock != nil {
@@ -86,17 +105,17 @@ func download(src string, dst string) error {
 
 	// Politely prevent tests from shooting themselves in the foot
 	if withinUnitTest() {
-		return fmt.Errorf("unmocked download under test")
+		return errors.New("unmocked download under test")
 	}
 
 	klog.Infof("Downloading: %s -> %s", src, dst)
 	if err := client.Get(); err != nil {
-		return errors.Wrapf(err, "getter: %+v", client)
+		return fmt.Errorf("getter: %+v: %w", client, err)
 	}
 	return os.Rename(tmpDst, dst)
 }
 
-// withinUnitTset detects if we are in running within a unit-test
+// withinUnitTest detects if we are in running within a unit-test
 func withinUnitTest() bool {
 	// Nope, it's the integration test
 	if flag.Lookup("minikube-start-args") != nil || strings.HasPrefix(filepath.Base(os.Args[0]), "e2e-") {
@@ -107,18 +126,19 @@ func withinUnitTest() bool {
 }
 
 // lockDownload locks `file` if possible and returns a releaser that must be called to release the lock.
-func lockDownload(file string) (mutex.Releaser, error) {
+func lockDownload(file string) (lock.Releaser, error) {
 	type retPair struct {
-		mutex.Releaser
+		lock.Releaser
 		error
 	}
 	lockChannel := make(chan retPair)
 
 	go func() {
 		spec := lock.PathMutexSpec(file)
-		releaser, err := mutex.Acquire(spec)
+		spec.Timeout = 5 * time.Minute
+		releaser, err := lock.Acquire(spec)
 		if err != nil {
-			lockChannel <- retPair{nil, errors.Wrapf(err, "failed to acquire lock \"%s\": %+v", file, spec)}
+			lockChannel <- retPair{nil, fmt.Errorf("failed to acquire lock \"%s\": %+v: %w", file, spec, err)}
 			return
 		}
 		lockChannel <- retPair{releaser, err}

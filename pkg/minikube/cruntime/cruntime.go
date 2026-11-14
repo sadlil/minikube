@@ -20,9 +20,11 @@ package cruntime
 import (
 	"fmt"
 	"os/exec"
+	"strings"
+
+	"errors"
 
 	"github.com/blang/semver/v4"
-	"github.com/pkg/errors"
 	"k8s.io/klog/v2"
 	"k8s.io/minikube/pkg/minikube/assets"
 	"k8s.io/minikube/pkg/minikube/command"
@@ -65,8 +67,12 @@ type CommandRunner interface {
 	WaitCmd(sc *command.StartedCmd) (*command.RunResult, error)
 	// Copy is a convenience method that runs a command to copy a file
 	Copy(assets.CopyableFile) error
+	// CopyFrom is a convenience method that runs a command to copy a file back
+	CopyFrom(assets.CopyableFile) error
 	// Remove is a convenience method that runs a command to remove a file
 	Remove(assets.CopyableFile) error
+
+	ReadableFile(sourcePath string) (assets.ReadableFile, error)
 }
 
 // Manager is a common interface for container runtimes
@@ -76,7 +82,7 @@ type Manager interface {
 	// Version retrieves the current version of this runtime
 	Version() (string, error)
 	// Enable idempotently enables this runtime on a host
-	Enable(bool, bool) error
+	Enable(bool, string, bool) error
 	// Disable idempotently disables this runtime on a host
 	Disable() error
 	// Active returns whether or not a runtime is active on a host
@@ -101,11 +107,15 @@ type Manager interface {
 	BuildImage(string, string, string, bool, []string, []string) error
 	// Save an image from the runtime on a host
 	SaveImage(string, string) error
+	// Tag an image
+	TagImage(string, string) error
+	// Push an image from the runtime to the container registry
+	PushImage(string) error
 
-	// ImageExists takes image name and image sha checks if an it exists
+	// ImageExists takes image name and optionally image sha to check if an image exists
 	ImageExists(string, string) bool
 	// ListImages returns a list of images managed by this container runtime
-	ListImages(ListImagesOptions) ([]string, error)
+	ListImages(ListImagesOptions) ([]ListImage, error)
 
 	// RemoveImage remove image based on name
 	RemoveImage(string) error
@@ -138,12 +148,16 @@ type Config struct {
 	Socket string
 	// Runner is the CommandRunner object to execute commands with
 	Runner CommandRunner
+	// NetworkPlugin name of networking plugin ("cni")
+	NetworkPlugin string
 	// ImageRepository image repository to download image from
 	ImageRepository string
 	// KubernetesVersion Kubernetes version
 	KubernetesVersion semver.Version
 	// InsecureRegistry list of insecure registries
 	InsecureRegistry []string
+	// GPUs add GPU devices to the container
+	GPUs string
 }
 
 // ListContainersOptions are the options to use for listing containers
@@ -158,6 +172,13 @@ type ListContainersOptions struct {
 
 // ListImagesOptions are the options to use for listing images
 type ListImagesOptions struct {
+}
+
+type ListImage struct {
+	ID          string   `json:"id" yaml:"id"`
+	RepoDigests []string `json:"repoDigests" yaml:"repoDigests"`
+	RepoTags    []string `json:"repoTags" yaml:"repoTags"`
+	Size        string   `json:"size" yaml:"size"`
 }
 
 // ErrContainerRuntimeNotRunning is thrown when container runtime is not running
@@ -192,14 +213,28 @@ func New(c Config) (Manager, error) {
 	sm := sysinit.New(c.Runner)
 
 	switch c.Type {
+	// "" is docker: until c4800a611 (2022, "Make the default container runtime
+	// dynamic") start persisted the raw --container-runtime flag, whose default
+	// is "". Those profiles are docker. Later starts store a real name, so ""
+	// is not the current product default and must not become containerd.
 	case "", "docker":
+		sp := c.Socket
+		cs := ""
+		// There is no more dockershim socket, in Kubernetes version 1.24 and beyond
+		if sp == "" && c.KubernetesVersion.GTE(semver.MustParse("1.24.0-alpha.0")) {
+			sp = ExternalDockerCRISocket
+			cs = "cri-docker.socket"
+		}
 		return &Docker{
-			Socket:            c.Socket,
+			Socket:            sp,
 			Runner:            c.Runner,
+			NetworkPlugin:     c.NetworkPlugin,
 			ImageRepository:   c.ImageRepository,
 			KubernetesVersion: c.KubernetesVersion,
 			Init:              sm,
-			UseCRI:            (c.Socket != ""), // !dockershim
+			UseCRI:            (sp != ""), // !dockershim
+			CRIService:        cs,
+			GPUs:              c.GPUs,
 		}, nil
 	case "crio", "cri-o":
 		return &CRIO{
@@ -289,7 +324,26 @@ func compatibleWithVersion(runtime, v string) error {
 func CheckCompatibility(cr Manager) error {
 	v, err := cr.Version()
 	if err != nil {
-		return errors.Wrap(err, "Failed to check container runtime version")
+		return fmt.Errorf("Failed to check container runtime version: %w", err)
 	}
 	return compatibleWithVersion(cr.Name(), v)
+}
+
+// CheckKernelCompatibility returns an error when the kernel is older than the specified version.
+func CheckKernelCompatibility(cr CommandRunner, major, minor int) error {
+	expected := fmt.Sprintf("%d.%d", major, minor)
+	unameRes, err := cr.RunCmd(exec.Command("uname", "-r"))
+	if err != nil {
+		return err
+	}
+	actual := strings.TrimSpace(unameRes.Stdout.String())
+	sortRes, err := cr.RunCmd(exec.Command("sh", "-euc", fmt.Sprintf(`(echo %s; echo %s) | sort -V | head -n1`, actual, expected)))
+	if err != nil {
+		return err
+	}
+	comparison := strings.TrimSpace(sortRes.Stdout.String())
+	if comparison != expected {
+		return NewErrServiceVersion("kernel", expected, actual)
+	}
+	return nil
 }

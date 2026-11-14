@@ -20,6 +20,7 @@ import (
 	"fmt"
 
 	"k8s.io/minikube/pkg/minikube/style"
+	"k8s.io/minikube/pkg/minikube/translate"
 )
 
 const issueBase = "https://github.com/kubernetes/minikube/issues"
@@ -56,12 +57,17 @@ func (k *Kind) IssueURLs() []string {
 
 // Sections are ordered roughly by stack dependencies
 var (
+	// minikube could not find a patch for the provided major.minor version
+	PatchNotFound = Kind{ID: "MK_PATCH_NOT_FOUND", ExitCode: ExProgramUsage,
+		Advice: translate.T("Specify --kubernetes-version in v<major>.<minor.<build> form. example: 'v1.1.14'"),
+	}
+
 	// minikube has been passed an incorrect parameter
 	Usage = Kind{ID: "MK_USAGE", ExitCode: ExProgramUsage}
 	// minikube has no current cluster running
 	UsageNoProfileRunning = Kind{ID: "MK_USAGE_NO_PROFILE", ExitCode: ExProgramUsage,
-		Advice: `You can create one using 'minikube start'.
-		`,
+		Advice: translate.T(`You can create one using 'minikube start'.
+		`),
 		Style: style.Caching,
 	}
 	// minikube was interrupted by an OS signal
@@ -70,12 +76,20 @@ var (
 	// user attempted to run a Windows executable (.exe) inside of WSL rather than using the Linux binary
 	WrongBinaryWSL = Kind{ID: "MK_WRONG_BINARY_WSL", ExitCode: ExProgramUnsupported}
 
+	// this feature is unimplemented for whatever reason
+	Unimplemented = Kind{ID: "MK_UNIMPLEMENTED", ExitCode: ExProgramUnsupported}
+
 	// minikube failed to create a new Docker Machine api client
 	NewAPIClient = Kind{ID: "MK_NEW_APICLIENT", ExitCode: ExProgramError}
 	// minikube could not disable an addon, e.g. dashboard addon
 	InternalAddonDisable = Kind{ID: "MK_ADDON_DISABLE", ExitCode: ExProgramError}
 	// minikube could not enable an addon, e.g. dashboard addon
 	InternalAddonEnable = Kind{ID: "MK_ADDON_ENABLE", ExitCode: ExProgramError}
+	// minikube could not enable an addon on a paused cluster
+	InternalAddonEnablePaused = Kind{ID: "MK_ADDON_ENABLE_PAUSED", ExitCode: ExProgramConflict}
+	// minikube could not disable an addon on a paused cluster
+	InternalAddonDisablePaused = Kind{ID: "MK_ADDON_DISABLE_PAUSED", ExitCode: ExProgramConflict}
+
 	// minikube failed to update internal configuration, such as the cached images config map
 	InternalAddConfig = Kind{ID: "MK_ADD_CONFIG", ExitCode: ExProgramError}
 	// minikube failed to create a cluster bootstrapper
@@ -86,6 +100,8 @@ var (
 	InternalCacheLoad = Kind{ID: "MK_CACHE_LOAD", ExitCode: ExProgramError}
 	// minikube failed to load a Docker Machine CommandRunner
 	InternalCommandRunner = Kind{ID: "MK_COMMAND_RUNNER", ExitCode: ExProgramError}
+	// minikube failed to start nerdctld
+	StartNerdctld = Kind{ID: "MK_START_NERDCTLD", ExitCode: ExProgramError}
 	// minikube failed to generate shell command completion for a supported shell
 	InternalCompletion = Kind{ID: "MK_COMPLETION", ExitCode: ExProgramError}
 	// minikube failed to set an internal config value
@@ -94,7 +110,7 @@ var (
 	InternalConfigUnset = Kind{ID: "MK_CONFIG_UNSET", ExitCode: ExProgramError}
 	// minikube failed to view current config values
 	InternalConfigView = Kind{ID: "MK_CONFIG_VIEW", ExitCode: ExProgramError}
-	// minikybe failed to delete an internal configuration, such as a cached image
+	// minikube failed to delete an internal configuration, such as a cached image
 	InternalDelConfig = Kind{ID: "MK_DEL_CONFIG", ExitCode: ExProgramError}
 	// minikube failed to generate script to activate minikube docker-env
 	InternalDockerScript = Kind{ID: "MK_DOCKER_SCRIPT", ExitCode: ExProgramError}
@@ -149,11 +165,11 @@ var (
 	RsrcInsufficientDarwinDockerCores = Kind{
 		ID:       "RSRC_DOCKER_CORES",
 		ExitCode: ExInsufficientCores,
-		Advice: `1. Click on "Docker for Desktop" menu icon
+		Advice: translate.T(`1. Click on "Docker for Desktop" menu icon
 			2. Click "Preferences"
 			3. Click "Resources"
 			4. Increase "CPUs" slider bar to 2 or higher
-			5. Click "Apply & Restart"`,
+			5. Click "Apply & Restart"`),
 		Style: style.UnmetRequirement,
 		URL:   "https://docs.docker.com/docker-for-mac/#resources",
 	}
@@ -162,11 +178,11 @@ var (
 	RsrcInsufficientWindowsDockerCores = Kind{
 		ID:       "RSRC_DOCKER_CORES",
 		ExitCode: ExInsufficientCores,
-		Advice: `1. Open the "Docker Desktop" menu by clicking the Docker icon in the system tray
+		Advice: translate.T(`1. Open the "Docker Desktop" menu by clicking the Docker icon in the system tray
 		2. Click "Settings"
 		3. Click "Resources"
 		4. Increase "CPUs" slider bar to 2 or higher
-		5. Click "Apply & Restart"`,
+		5. Click "Apply & Restart"`),
 		URL:   "https://docs.docker.com/docker-for-windows/#resources",
 		Style: style.UnmetRequirement,
 	}
@@ -181,11 +197,11 @@ var (
 	RsrcInsufficientWindowsDockerMemory = Kind{
 		ID:       "RSRC_DOCKER_MEMORY",
 		ExitCode: ExInsufficientMemory,
-		Advice: `1. Open the "Docker Desktop" menu by clicking the Docker icon in the system tray
+		Advice: translate.T(`1. Open the "Docker Desktop" menu by clicking the Docker icon in the system tray
 		2. Click "Settings"
 		3. Click "Resources"
 		4. Increase "Memory" slider bar to {{.recommend}} or higher
-		5. Click "Apply & Restart"`,
+		5. Click "Apply & Restart"`),
 		URL:   "https://docs.docker.com/docker-for-windows/#resources",
 		Style: style.UnmetRequirement,
 	}
@@ -193,35 +209,41 @@ var (
 	RsrcInsufficientDarwinDockerMemory = Kind{
 		ID:       "RSRC_DOCKER_MEMORY",
 		ExitCode: ExInsufficientMemory,
-		Advice: `1. Click on "Docker for Desktop" menu icon
+		Advice: translate.T(`1. Click on "Docker for Desktop" menu icon
 			2. Click "Preferences"
 			3. Click "Resources"
 			4. Increase "Memory" slider bar to {{.recommend}} or higher
-			5. Click "Apply & Restart"`,
+			5. Click "Apply & Restart"`),
 		Style: style.UnmetRequirement,
 		URL:   "https://docs.docker.com/docker-for-mac/#resources",
+	}
+	// invalid memory value for Hyper-V
+	RsrcInvalidHyperVMemory = Kind{
+		ID:       "RSRC_INVALID_HYPERV_MEMORY",
+		ExitCode: ExResourceError,
+		Style:    style.UnmetRequirement,
 	}
 
 	// insufficient disk storage available to the docker driver
 	RsrcInsufficientDockerStorage = Kind{
 		ID:       "RSRC_DOCKER_STORAGE",
 		ExitCode: ExInsufficientStorage,
-		Advice: `Try one or more of the following to free up space on the device:
-	
+		Advice: translate.T(`Try one or more of the following to free up space on the device:
+
 			1. Run "docker system prune" to remove unused Docker data (optionally with "-a")
 			2. Increase the storage allocated to Docker for Desktop by clicking on:
 				Docker icon > Preferences > Resources > Disk Image Size
-			3. Run "minikube ssh -- docker system prune" if using the Docker container runtime`,
+			3. Run "minikube ssh -- docker system prune" if using the Docker container runtime`),
 		Issues: []int{9024},
 	}
 	// insufficient disk storage available to the podman driver
 	RsrcInsufficientPodmanStorage = Kind{
 		ID:       "RSRC_PODMAN_STORAGE",
 		ExitCode: ExInsufficientStorage,
-		Advice: `Try one or more of the following to free up space on the device:
-	
+		Advice: translate.T(`Try one or more of the following to free up space on the device:
+
 			1. Run "sudo podman system prune" to remove unused podman data
-			2. Run "minikube ssh -- docker system prune" if using the Docker container runtime`,
+			2. Run "minikube ssh -- docker system prune" if using the Docker container runtime`),
 		Issues: []int{9024},
 	}
 
@@ -240,7 +262,7 @@ var (
 	HostHomePermission = Kind{
 		ID:       "HOST_HOME_PERMISSION",
 		ExitCode: ExHostPermission,
-		Advice:   "Your user lacks permissions to the minikube profile directory. Run: 'sudo chown -R $USER $HOME/.minikube; chmod -R u+wrx $HOME/.minikube' to fix",
+		Advice:   translate.T("Your user lacks permissions to the minikube profile directory. Run: 'sudo chown -R $USER $HOME/.minikube; chmod -R u+wrx $HOME/.minikube' to fix"),
 		Issues:   []int{9165},
 	}
 
@@ -266,6 +288,8 @@ var (
 	HostPurge = Kind{ID: "HOST_PURGE", ExitCode: ExHostError}
 	// minikube failed to persist profile config
 	HostSaveProfile = Kind{ID: "HOST_SAVE_PROFILE", ExitCode: ExHostConfig}
+	// Host doesn't support 9p
+	HostUnsupported = Kind{ID: "HOST_UNSUPPORTED", ExitCode: ExHostUnsupported}
 
 	// minikube could not find a provider for the selected driver
 	ProviderNotFound = Kind{ID: "PROVIDER_NOT_FOUND", ExitCode: ExProviderNotFound}
@@ -274,14 +298,16 @@ var (
 
 	// minikube failed to access the driver control plane or API endpoint
 	DrvCPEndpoint = Kind{ID: "DRV_CP_ENDPOINT",
-		Advice: `Recreate the cluster by running:
+		Advice: translate.T(`Recreate the cluster by running:
 		minikube delete {{.profileArg}}
-		minikube start {{.profileArg}}`,
+		minikube start {{.profileArg}}`),
 		ExitCode: ExDriverError,
 		Style:    style.Failure,
 	}
 	// minikube failed to bind container ports to host ports
 	DrvPortForward = Kind{ID: "DRV_PORT_FORWARD", ExitCode: ExDriverError}
+	// the driver is currently not supported by minikube
+	DrvUnsupported = Kind{ID: "DRV_UNSUPPORTED", ExitCode: ExDriverUnsupported}
 	// the driver in use does not support multi-node clusters
 	DrvUnsupportedMulti = Kind{ID: "DRV_UNSUPPORTED_MULTINODE", ExitCode: ExDriverConflict}
 	// the specified driver is not supported on the host OS
@@ -315,8 +341,16 @@ var (
 	GuestImageLoad = Kind{ID: "GUEST_IMAGE_LOAD", ExitCode: ExGuestError}
 	// minikube failed to remove an image
 	GuestImageRemove = Kind{ID: "GUEST_IMAGE_REMOVE", ExitCode: ExGuestError}
+	// minikube failed to pull an image
+	GuestImagePull = Kind{ID: "GUEST_IMAGE_PULL", ExitCode: ExGuestError}
 	// minikube failed to build an image
 	GuestImageBuild = Kind{ID: "GUEST_IMAGE_BUILD", ExitCode: ExGuestError}
+	// minikube failed to push or save an image
+	GuestImageSave = Kind{ID: "GUEST_IMAGE_SAVE", ExitCode: ExGuestError}
+	// minikube failed to push an image
+	GuestImagePush = Kind{ID: "GUEST_IMAGE_PUSH", ExitCode: ExGuestError}
+	// minikube failed to tag an image
+	GuestImageTag = Kind{ID: "GUEST_IMAGE_TAG", ExitCode: ExGuestError}
 	// minikube failed to load host
 	GuestLoadHost = Kind{ID: "GUEST_LOAD_HOST", ExitCode: ExGuestError}
 	// minkube failed to create a mount
@@ -325,10 +359,10 @@ var (
 	GuestMountCouldNotConnect = Kind{
 		ID:       "GUEST_MOUNT_COULD_NOT_CONNECT",
 		ExitCode: ExGuestError,
-		Advice: `If the host has a firewall:
-		
-		1. Allow a port through the firewall
-		2. Specify "--port=<port_number>" for "minikube mount"`,
+		Advice: translate.T(`If the host has a firewall:
+		1. Allow inbound port 22 to minikube from the host
+		2. Allow an inbound port of your choosing from minikube to the host
+		3. Specify "--port=<your_inbound_port_number>" for "minikube mount"`),
 	}
 	// minkube failed to update a mount
 	GuestMountConflict = Kind{ID: "GUEST_MOUNT_CONFLICT", ExitCode: ExGuestConflict}
@@ -364,6 +398,8 @@ var (
 	GuestDrvMismatch = Kind{ID: "GUEST_DRIVER_MISMATCH", ExitCode: ExGuestConflict, Style: style.Conflict}
 	// minikube could not find conntrack on the host, which is required from Kubernetes 1.18 onwards
 	GuestMissingConntrack = Kind{ID: "GUEST_MISSING_CONNTRACK", ExitCode: ExGuestUnsupported}
+	// minikube could not find crictl on the host, which is required from Kubernetes 1.24 onwards
+	GuestMissingCrictl = Kind{ID: "GUEST_MISSING_CRICTL", ExitCode: ExGuestUnsupported}
 
 	// minikube failed to get the host IP to use from within the VM
 	IfHostIP = Kind{ID: "IF_HOST_IP", ExitCode: ExLocalNetworkError}
@@ -373,6 +409,16 @@ var (
 	IfMountPort = Kind{ID: "IF_MOUNT_PORT", ExitCode: ExLocalNetworkError}
 	// minikube failed to access an ssh client on the host machine
 	IfSSHClient = Kind{ID: "IF_SSH_CLIENT", ExitCode: ExLocalNetworkError}
+	// minikube failed to create a dedicated network
+	IfDedicatedNetwork = Kind{ID: "IF_DEDICATED_NETWORK", ExitCode: ExLocalNetworkError}
+	// minikube failed to populate dchpd_leases file due to bootpd being blocked by firewall
+	IfBootpdFirewall = Kind{
+		ID:       "IF_BOOTPD_FIREWALL",
+		ExitCode: ExLocalNetworkError,
+		Advice: translate.T(`Your firewall is likely blocking bootpd, to unblock it run:
+	sudo /usr/libexec/ApplicationFirewall/socketfilterfw --add /usr/libexec/bootpd
+	sudo /usr/libexec/ApplicationFirewall/socketfilterfw --unblock /usr/libexec/bootpd`),
+	}
 
 	// minikube failed to cache kubernetes binaries for the current runtime
 	InetCacheBinaries = Kind{ID: "INET_CACHE_BINARIES", ExitCode: ExInternetError}
@@ -380,6 +426,8 @@ var (
 	InetCacheKubectl = Kind{ID: "INET_CACHE_KUBECTL", ExitCode: ExInternetError}
 	// minikube failed to cache required images to tar files
 	InetCacheTar = Kind{ID: "INET_CACHE_TAR", ExitCode: ExInternetError}
+	// minikube failed to download licenses
+	InetLicenses = Kind{ID: "INET_LICENSES", ExitCode: ExInternetError}
 	// minikube was unable to access main repository and mirrors for images
 	InetRepo = Kind{ID: "INET_REPO", ExitCode: ExInternetError}
 	// minikube was unable to access any known image repositories
@@ -393,17 +441,23 @@ var (
 	RuntimeEnable = Kind{ID: "RUNTIME_ENABLE", ExitCode: ExRuntimeError}
 	// minikube failed to cache images for the current container runtime
 	RuntimeCache = Kind{ID: "RUNTIME_CACHE", ExitCode: ExRuntimeError}
+	// minikube failed to start an ssh-agent when executing docker-env
+	SSHAgentStart = Kind{ID: "SSH_AGENT_START", ExitCode: ExRuntimeError}
 
 	// service check timed out while starting minikube dashboard
 	SvcCheckTimeout = Kind{ID: "SVC_CHECK_TIMEOUT", ExitCode: ExSvcTimeout}
 	// minikube was unable to access a service
 	SvcTimeout = Kind{ID: "SVC_TIMEOUT", ExitCode: ExSvcTimeout}
+	// minikube found that the service has no available pods
+	SvcUnreachable = Kind{ID: "SVC_UNREACHABLE", ExitCode: ExSvcNotFound}
 	// minikube failed to list services for the specified namespace
 	SvcList = Kind{ID: "SVC_LIST", ExitCode: ExSvcError}
 	// minikube failed to start a tunnel
 	SvcTunnelStart = Kind{ID: "SVC_TUNNEL_START", ExitCode: ExSvcError}
 	// minikube could not stop an active tunnel
 	SvcTunnelStop = Kind{ID: "SVC_TUNNEL_STOP", ExitCode: ExSvcError}
+	// another instance of tunnel already running
+	SvcTunnelAlreadyRunning = Kind{ID: "TUNNEL_ALREADY_RUNNING", ExitCode: ExSvcConflict, Style: style.Usage}
 	// minikube was unable to access the service url
 	SvcURLTimeout = Kind{ID: "SVC_URL_TIMEOUT", ExitCode: ExSvcTimeout}
 	// minikube couldn't find the specified service in the specified namespace
@@ -427,23 +481,91 @@ var (
 	KubernetesInstallFailedRuntimeNotRunning = Kind{ID: "K8S_INSTALL_FAILED_CONTAINER_RUNTIME_NOT_RUNNING", ExitCode: ExRuntimeNotRunning}
 	// an outdated Kubernetes version was specified for minikube to use
 	KubernetesTooOld = Kind{ID: "K8S_OLD_UNSUPPORTED", ExitCode: ExControlPlaneUnsupported}
+	// a too new Kubernetes version was specified for minikube to use
+	KubernetesTooNew = Kind{ID: "K8S_NEW_UNSUPPORTED", ExitCode: ExControlPlaneUnsupported}
+	// error fetching GitHub Kubernetes version list
+	KubernetesNotConnect = Kind{ID: "K8S_FAIL_CONNECT", ExitCode: ExInternetError}
 	// minikube was unable to safely downgrade installed Kubernetes version
 	KubernetesDowngrade = Kind{
 		ID:       "K8S_DOWNGRADE_UNSUPPORTED",
 		ExitCode: ExControlPlaneUnsupported,
-		Advice: `1) Recreate the cluster with Kubernetes {{.new}}, by running:
-	  
+		Advice: translate.T(`1) Recreate the cluster with Kubernetes {{.new}}, by running:
+
 		  minikube delete{{.profile}}
 		  minikube start{{.profile}} --kubernetes-version={{.prefix}}{{.new}}
-	  
+
 		2) Create a second cluster with Kubernetes {{.new}}, by running:
-	  
+
 		  minikube start -p {{.suggestedName}} --kubernetes-version={{.prefix}}{{.new}}
-	  
+
 		3) Use the existing cluster at version Kubernetes {{.old}}, by running:
-	  
+
 		  minikube start{{.profile}} --kubernetes-version={{.prefix}}{{.old}}
-		`,
+		`),
+		Style: style.SeeNoEvil,
+	}
+
+	NotFoundCriDockerd = Kind{
+		ID:       "NOT_FOUND_CRI_DOCKERD",
+		ExitCode: ExProgramNotFound,
+		Advice: translate.T(`The none driver with Kubernetes v1.24+ and the docker container-runtime requires cri-dockerd.
+
+		Please install cri-dockerd using these instructions:
+
+		https://github.com/Mirantis/cri-dockerd`),
+		Style: style.Docker,
+	}
+	NotFoundDockerd = Kind{
+		ID:       "NOT_FOUND_DOCKERD",
+		ExitCode: ExProgramNotFound,
+		Advice: translate.T(`The none driver with Kubernetes v1.24+ and the docker container-runtime requires dockerd.
+
+		Please install dockerd using these instructions:
+
+		https://docs.docker.com/engine/install/`),
+		Style: style.Docker,
+	}
+	NotFoundCNIPlugins = Kind{
+		ID:       "NOT_FOUND_CNI_PLUGINS",
+		ExitCode: ExProgramNotFound,
+		Advice: translate.T(`The none driver with Kubernetes v1.24+ requires containernetworking-plugins.
+
+		Please install containernetworking-plugins using these instructions:
+
+		https://minikube.sigs.k8s.io/docs/faq/#how-do-i-install-containernetworking-plugins-for-none-driver`),
+		Style: style.CNI,
+	}
+	NotFoundSocketVMNet = Kind{
+		ID:       "NOT_FOUND_SOCKET_VMNET",
+		ExitCode: ExProgramNotFound,
+		Advice: translate.T(`socket_vmnet was not found on the system, resolve by:
+
+		Option 1) Installing socket_vmnet:
+
+		  https://minikube.sigs.k8s.io/docs/drivers/qemu/#networking
+
+		Option 2) Using the user network:
+
+		  minikube start{{.profile}} --driver qemu --network user`),
+		Style: style.SeeNoEvil,
+	}
+	NotFoundVmnetHelper = Kind{
+		ID:       "NOT_FOUND_VMNET_HELPER",
+		ExitCode: ExProgramNotFound,
+		Advice: translate.T(`vmnet-helper was not found on the system.
+
+		Please install vmnet-helper using these instructions:
+
+			curl -fsSL https://github.com/minikube-machine/vmnet-helper/releases/latest/download/install.sh | bash`),
+		Style: style.SeeNoEvil,
+	}
+	NotConfiguredVmnetHelper = Kind{
+		ID:       "NOT_CONFIGURED_VMNET_HELPER",
+		ExitCode: ExProgramConfig,
+		Advice: translate.T(`Configure vmnet-helper to run without a password.
+
+		Please install a vmnet-helper sudoers rule using these instructions:
+			curl -fsSL https://github.com/minikube-machine/vmnet-helper/releases/latest/download/install.sh | bash`),
 		Style: style.SeeNoEvil,
 	}
 )

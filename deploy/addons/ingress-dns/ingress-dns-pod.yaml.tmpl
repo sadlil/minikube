@@ -22,9 +22,8 @@ metadata:
     app: minikube-ingress-dns
     kubernetes.io/bootstrapping: rbac-defaults
     app.kubernetes.io/part-of: kube-system
-    addonmanager.kubernetes.io/mode: Reconcile
 ---
-apiVersion: rbac.authorization.k8s.io/v1beta1
+apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
   name: minikube-ingress-dns
@@ -33,7 +32,6 @@ metadata:
     app: minikube-ingress-dns
     kubernetes.io/bootstrapping: rbac-defaults
     app.kubernetes.io/part-of: kube-system
-    addonmanager.kubernetes.io/mode: Reconcile
     gcp-auth-skip-secret: "true"
 rules:
   - apiGroups:
@@ -47,7 +45,7 @@ rules:
       - list
       - watch
 ---
-apiVersion: rbac.authorization.k8s.io/v1beta1
+apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
   name: minikube-ingress-dns
@@ -56,7 +54,6 @@ metadata:
     app: minikube-ingress-dns
     kubernetes.io/bootstrapping: rbac-defaults
     app.kubernetes.io/part-of: kube-system
-    addonmanager.kubernetes.io/mode: Reconcile
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
@@ -74,16 +71,16 @@ metadata:
   labels:
     app: minikube-ingress-dns
     app.kubernetes.io/part-of: kube-system
-    addonmanager.kubernetes.io/mode: Reconcile
 spec:
   serviceAccountName: minikube-ingress-dns
   hostNetwork: true
   containers:
     - name: minikube-ingress-dns
-      image: {{.CustomRegistries.IngressDNS  | default .ImageRepository | default .Registries.IngressDNS }}{{.Images.IngressDNS}}
+      image: {{.CustomRegistries.IngressDNS | default .ImageRepository | default .Registries.IngressDNS }}{{.Images.IngressDNS}}
       imagePullPolicy: IfNotPresent
       ports:
         - containerPort: 53
+          hostPort: 53
           protocol: UDP
       env:
         - name: DNS_PORT
@@ -92,3 +89,21 @@ spec:
           valueFrom:
             fieldRef:
               fieldPath: status.podIP
+      volumeMounts:
+        - mountPath: /config
+          name: minikube-ingress-dns-config-volume
+  volumes:
+    - name: minikube-ingress-dns-config-volume
+      configMap:
+        name: minikube-ingress-dns
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: minikube-ingress-dns
+  namespace: kube-system
+  labels:
+    app: minikube-ingress-dns
+    app.kubernetes.io/part-of: kube-system
+data:
+  dns-nodata-delay-ms: "20"

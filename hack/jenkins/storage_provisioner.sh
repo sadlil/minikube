@@ -44,7 +44,7 @@ if [ $ec -gt 0 ]; then
 fi
 
 # Bump the preload version
-PLV=$(egrep "PreloadVersion =" pkg/minikube/download/preload.go | cut -d \" -f 2)
+PLV=$(grep -E "PreloadVersion =" pkg/minikube/download/preload.go | cut -d \" -f 2)
 RAW=${PLV:1}
 RAW=$((RAW+1))
 PLV=v${RAW}
@@ -53,7 +53,7 @@ ${SED} "s/PreloadVersion = .*/PreloadVersion = \"${PLV}\"/" pkg/minikube/downloa
 
 # Open a PR with the changes
 git config user.name "minikube-bot"
-git config user.email "minikube-bot@google.com"
+git config user.email "20374350+minikube-bot@users.noreply.github.com"
 
 branch=storage-provisioner-${SP_VERSION}
 git checkout -b ${branch}

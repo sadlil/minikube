@@ -17,20 +17,23 @@ limitations under the License.
 package command
 
 import (
+	"bufio"
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"os/exec"
 	"path"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
-	"github.com/docker/machine/libmachine/drivers"
 	"github.com/kballard/go-shellquote"
-	"github.com/pkg/errors"
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/sync/errgroup"
 	"k8s.io/klog/v2"
+	"k8s.io/minikube/pkg/libmachine/drivers"
 	"k8s.io/minikube/pkg/minikube/assets"
 	"k8s.io/minikube/pkg/minikube/sshutil"
 	"k8s.io/minikube/pkg/util/retry"
@@ -49,6 +52,49 @@ type SSHRunner struct {
 	s *ssh.Session
 }
 
+type sshReadableFile struct {
+	length      int
+	sourcePath  string
+	permissions string
+	sess        *ssh.Session
+	modTime     time.Time
+	reader      io.Reader
+}
+
+// GetLength returns length of file
+func (s *sshReadableFile) GetLength() int {
+	return s.length
+}
+
+// GetSourcePath returns asset name
+func (s *sshReadableFile) GetSourcePath() string {
+	return s.sourcePath
+}
+
+// GetPermissions returns permissions
+func (s *sshReadableFile) GetPermissions() string {
+	return s.permissions
+}
+
+func (s *sshReadableFile) GetModTime() (time.Time, error) {
+	return s.modTime, nil
+}
+
+func (s *sshReadableFile) Read(p []byte) (int, error) {
+	if s.GetLength() == 0 {
+		return 0, errors.New("attempted read from a 0 length asset")
+	}
+	return s.reader.Read(p)
+}
+
+func (s *sshReadableFile) Seek(_ int64, _ int) (int64, error) {
+	return 0, errors.New("Seek is not implemented for sshReadableFile")
+}
+
+func (s *sshReadableFile) Close() error {
+	return s.sess.Close()
+}
+
 // NewSSHRunner returns a new SSHRunner that will run commands
 // through the ssh.Client provided.
 func NewSSHRunner(d drivers.Driver) *SSHRunner {
@@ -63,7 +109,7 @@ func (s *SSHRunner) client() (*ssh.Client, error) {
 
 	c, err := sshutil.NewSSHClient(s.d)
 	if err != nil {
-		return nil, errors.Wrap(err, "new client")
+		return nil, fmt.Errorf("new client: %w", err)
 	}
 	s.c = c
 	return s.c, nil
@@ -75,7 +121,7 @@ func (s *SSHRunner) session() (*ssh.Session, error) {
 	getSession := func() (err error) {
 		client, err := s.client()
 		if err != nil {
-			return errors.Wrap(err, "new client")
+			return fmt.Errorf("new client: %w", err)
 		}
 
 		sess, err = client.NewSession()
@@ -101,7 +147,7 @@ func (s *SSHRunner) Remove(f assets.CopyableFile) error {
 
 	sess, err := s.session()
 	if err != nil {
-		return errors.Wrap(err, "getting ssh session")
+		return fmt.Errorf("getting ssh session: %w", err)
 	}
 
 	defer sess.Close()
@@ -112,28 +158,24 @@ func (s *SSHRunner) Remove(f assets.CopyableFile) error {
 func teeSSH(s *ssh.Session, cmd string, outB io.Writer, errB io.Writer) error {
 	outPipe, err := s.StdoutPipe()
 	if err != nil {
-		return errors.Wrap(err, "stdout")
+		return fmt.Errorf("stdout: %w", err)
 	}
 
 	errPipe, err := s.StderrPipe()
 	if err != nil {
-		return errors.Wrap(err, "stderr")
+		return fmt.Errorf("stderr: %w", err)
 	}
 	var wg sync.WaitGroup
-	wg.Add(2)
-
-	go func() {
+	wg.Go(func() {
 		if err := teePrefix(ErrPrefix, errPipe, errB, klog.V(8).Infof); err != nil {
 			klog.Errorf("tee stderr: %v", err)
 		}
-		wg.Done()
-	}()
-	go func() {
+	})
+	wg.Go(func() {
 		if err := teePrefix(OutPrefix, outPipe, outB, klog.V(8).Infof); err != nil {
 			klog.Errorf("tee stdout: %v", err)
 		}
-		wg.Done()
-	}()
+	})
 	err = s.Run(cmd)
 	wg.Wait()
 	return err
@@ -142,7 +184,7 @@ func teeSSH(s *ssh.Session, cmd string, outB io.Writer, errB io.Writer) error {
 // RunCmd implements the Command Runner interface to run a exec.Cmd object
 func (s *SSHRunner) RunCmd(cmd *exec.Cmd) (*RunResult, error) {
 	if cmd.Stdin != nil {
-		return nil, fmt.Errorf("SSHRunner does not support stdin - you could be the first to add it")
+		return nil, errors.New("SSHRunner does not support stdin - you could be the first to add it")
 	}
 
 	rr := &RunResult{Args: cmd.Args}
@@ -167,7 +209,7 @@ func (s *SSHRunner) RunCmd(cmd *exec.Cmd) (*RunResult, error) {
 
 	sess, err := s.session()
 	if err != nil {
-		return rr, errors.Wrap(err, "NewSession")
+		return rr, fmt.Errorf("NewSession: %w", err)
 	}
 
 	defer func() {
@@ -181,9 +223,8 @@ func (s *SSHRunner) RunCmd(cmd *exec.Cmd) (*RunResult, error) {
 	err = teeSSH(sess, shellquote.Join(cmd.Args...), outb, errb)
 	elapsed := time.Since(start)
 
-	if exitError, ok := err.(*exec.ExitError); ok {
-		rr.ExitCode = exitError.ExitCode()
-	}
+	rr.ExitCode = s.exitCode(err)
+
 	// Decrease log spam
 	if elapsed > (1 * time.Second) {
 		klog.Infof("Completed: %s: (%s)", rr.Command(), elapsed)
@@ -199,26 +240,24 @@ func (s *SSHRunner) RunCmd(cmd *exec.Cmd) (*RunResult, error) {
 func teeSSHStart(s *ssh.Session, cmd string, outB io.Writer, errB io.Writer, wg *sync.WaitGroup) error {
 	outPipe, err := s.StdoutPipe()
 	if err != nil {
-		return errors.Wrap(err, "stdout")
+		return fmt.Errorf("stdout: %w", err)
 	}
 
 	errPipe, err := s.StderrPipe()
 	if err != nil {
-		return errors.Wrap(err, "stderr")
+		return fmt.Errorf("stderr: %w", err)
 	}
 
-	go func() {
+	wg.Go(func() {
 		if err := teePrefix(ErrPrefix, errPipe, errB, klog.V(8).Infof); err != nil {
 			klog.Errorf("tee stderr: %v", err)
 		}
-		wg.Done()
-	}()
-	go func() {
+	})
+	wg.Go(func() {
 		if err := teePrefix(OutPrefix, outPipe, outB, klog.V(8).Infof); err != nil {
 			klog.Errorf("tee stdout: %v", err)
 		}
-		wg.Done()
-	}()
+	})
 
 	return s.Start(cmd)
 }
@@ -226,15 +265,14 @@ func teeSSHStart(s *ssh.Session, cmd string, outB io.Writer, errB io.Writer, wg 
 // StartCmd implements the Command Runner interface to start a exec.Cmd object
 func (s *SSHRunner) StartCmd(cmd *exec.Cmd) (*StartedCmd, error) {
 	if cmd.Stdin != nil {
-		return nil, fmt.Errorf("SSHRunner does not support stdin - you could be the first to add it")
+		return nil, errors.New("SSHRunner does not support stdin - you could be the first to add it")
 	}
 
 	if s.s != nil {
-		return nil, fmt.Errorf("another SSH command has been started and is currently running")
+		return nil, errors.New("another SSH command has been started and is currently running")
 	}
 
 	var wg sync.WaitGroup
-	wg.Add(2)
 	rr := &RunResult{Args: cmd.Args}
 	sc := &StartedCmd{cmd: cmd, rr: rr, wg: &wg}
 	klog.Infof("Start: %v", rr.Command())
@@ -257,7 +295,7 @@ func (s *SSHRunner) StartCmd(cmd *exec.Cmd) (*StartedCmd, error) {
 
 	sess, err := s.session()
 	if err != nil {
-		return sc, errors.Wrap(err, "NewSession")
+		return sc, fmt.Errorf("NewSession: %w", err)
 	}
 
 	s.s = sess
@@ -270,15 +308,13 @@ func (s *SSHRunner) StartCmd(cmd *exec.Cmd) (*StartedCmd, error) {
 // WaitCmd implements the Command Runner interface to wait until a started exec.Cmd object finishes
 func (s *SSHRunner) WaitCmd(sc *StartedCmd) (*RunResult, error) {
 	if s.s == nil {
-		return nil, fmt.Errorf("there is no SSH command started")
+		return nil, errors.New("there is no SSH command started")
 	}
 
 	rr := sc.rr
 
 	err := s.s.Wait()
-	if exitError, ok := err.(*exec.ExitError); ok {
-		rr.ExitCode = exitError.ExitCode()
-	}
+	rr.ExitCode = s.exitCode(err)
 
 	sc.wg.Wait()
 
@@ -320,7 +356,7 @@ func (s *SSHRunner) Copy(f assets.CopyableFile) error {
 
 	sess, err := s.session()
 	if err != nil {
-		return errors.Wrap(err, "NewSession")
+		return fmt.Errorf("NewSession: %w", err)
 	}
 	defer func() {
 		if err := sess.Close(); err != nil {
@@ -332,13 +368,11 @@ func (s *SSHRunner) Copy(f assets.CopyableFile) error {
 
 	w, err := sess.StdinPipe()
 	if err != nil {
-		return errors.Wrap(err, "StdinPipe")
+		return fmt.Errorf("StdinPipe: %w", err)
 	}
 	// The scpcmd below *should not* return until all data is copied and the
 	// StdinPipe is closed. But let's use errgroup to make it explicit.
 	var g errgroup.Group
-	var copied int64
-
 	g.Go(func() error {
 		defer w.Close()
 		header := fmt.Sprintf("C%s %d %s\n", f.GetPermissions(), f.GetLength(), f.GetTargetName())
@@ -349,9 +383,9 @@ func (s *SSHRunner) Copy(f assets.CopyableFile) error {
 			return nil
 		}
 
-		copied, err = io.Copy(w, f)
+		copied, err := io.Copy(w, f)
 		if err != nil {
-			return errors.Wrap(err, "io.Copy")
+			return fmt.Errorf("io.Copy: %w", err)
 		}
 		if copied != int64(f.GetLength()) {
 			return fmt.Errorf("%s: expected to copy %d bytes, but copied %d instead", f.GetTargetName(), f.GetLength(), copied)
@@ -360,16 +394,159 @@ func (s *SSHRunner) Copy(f assets.CopyableFile) error {
 		return nil
 	})
 
-	scp := fmt.Sprintf("sudo test -d %s && sudo scp -t %s", f.GetTargetDir(), f.GetTargetDir())
+	dir := f.GetTargetDir()
+	scpCmd := fmt.Sprintf("%s && %s", shellquote.Join("sudo", "mkdir", "-p", dir), shellquote.Join("sudo", "scp", "-t", dir))
 	mtime, err := f.GetModTime()
 	if err != nil {
 		klog.Infof("error getting modtime for %s: %v", dst, err)
 	} else if mtime != (time.Time{}) {
-		scp += fmt.Sprintf(" && sudo touch -d \"%s\" %s", mtime.Format(layout), dst)
+		scpCmd = fmt.Sprintf("%s && %s", scpCmd, shellquote.Join("sudo", "touch", "-d", mtime.Format(layout), dst))
 	}
-	out, err := sess.CombinedOutput(scp)
+	out, err := sess.CombinedOutput(scpCmd)
 	if err != nil {
-		return fmt.Errorf("%s: %s\noutput: %s", scp, err, out)
+		return fmt.Errorf("%s: %s\noutput: %s", scpCmd, err, out)
 	}
 	return g.Wait()
+}
+
+// CopyFrom copies a file from the remote over SSH.
+func (s *SSHRunner) CopyFrom(f assets.CopyableFile) error {
+	dst := path.Join(path.Join(f.GetTargetDir(), f.GetTargetName()))
+
+	sess, err := s.session()
+	if err != nil {
+		return fmt.Errorf("NewSession: %w", err)
+	}
+	defer func() {
+		if err := sess.Close(); err != nil {
+			if err != io.EOF {
+				klog.Errorf("session close: %v", err)
+			}
+		}
+	}()
+
+	cmd := exec.Command("stat", "-c", "%s", dst)
+	rr, err := s.RunCmd(cmd)
+	if err != nil {
+		return fmt.Errorf("%s: %v", cmd, err)
+	}
+	length, err := strconv.Atoi(strings.TrimSuffix(rr.Stdout.String(), "\n"))
+	if err != nil {
+		return err
+	}
+	src := f.GetSourcePath()
+	klog.Infof("scp %s --> %s (%d bytes)", dst, src, length)
+	f.SetLength(length)
+
+	r, err := sess.StdoutPipe()
+	if err != nil {
+		return fmt.Errorf("StdoutPipe: %w", err)
+	}
+	w, err := sess.StdinPipe()
+	if err != nil {
+		return fmt.Errorf("StdinPipe: %w", err)
+	}
+	// The scpcmd below *should not* return until all data is copied and the
+	// StdinPipe is closed. But let's use errgroup to make it explicit.
+	var g errgroup.Group
+	var copied int64
+
+	g.Go(func() error {
+		defer w.Close()
+		br := bufio.NewReader(r)
+		fmt.Fprint(w, "\x00")
+		b, err := br.ReadBytes('\n')
+		if err != nil {
+			return fmt.Errorf("ReadBytes: %w", err)
+		}
+		if b[0] != 'C' {
+			return fmt.Errorf("unexpected: %v", b)
+		}
+		fmt.Fprint(w, "\x00")
+
+		copied = 0
+		for copied < int64(length) {
+			n, err := io.CopyN(f, br, int64(length))
+			if err != nil {
+				return fmt.Errorf("io.CopyN: %w", err)
+			}
+			copied += n
+		}
+		fmt.Fprint(w, "\x00")
+		err = sess.Wait()
+		if err != nil {
+			return err
+		}
+		return nil
+	})
+
+	scp := shellquote.Join("sudo", "scp", "-f", f.GetTargetPath())
+	err = sess.Start(scp)
+	if err != nil {
+		return fmt.Errorf("%s: %s", scp, err)
+	}
+	return g.Wait()
+}
+
+// ReadableFile returns assets.ReadableFile for the sourcePath (via `stat` command)
+func (s *SSHRunner) ReadableFile(sourcePath string) (assets.ReadableFile, error) {
+	klog.V(4).Infof("NewsshReadableFile: %s", sourcePath)
+
+	if !strings.HasPrefix(sourcePath, "/") {
+		return nil, errors.New("sourcePath must be an absolute Path. Relative Path is not allowed")
+	}
+
+	// get file size and modtime of the destination
+	rr, err := s.RunCmd(exec.Command("stat", "-c", "%#a %s %y", sourcePath))
+	if err != nil {
+		return nil, err
+	}
+
+	stdout := strings.TrimSpace(rr.Stdout.String())
+	outputs := strings.SplitN(stdout, " ", 3)
+
+	permission := outputs[0]
+	size, err := strconv.Atoi(outputs[1])
+	if err != nil {
+		return nil, err
+	}
+
+	modTime, err := time.Parse(layout, outputs[2])
+	if err != nil {
+		return nil, err
+	}
+
+	sess, err := s.session()
+	if err != nil {
+		return nil, fmt.Errorf("NewSession: %w", err)
+	}
+
+	r, err := sess.StdoutPipe()
+	if err != nil {
+		return nil, fmt.Errorf("StdOutPipe: %w", err)
+	}
+
+	cmd := fmt.Sprintf("cat %s", sourcePath)
+	if err := sess.Start(cmd); err != nil {
+		return nil, err
+	}
+
+	return &sshReadableFile{
+		length:      size,
+		sourcePath:  sourcePath,
+		permissions: permission,
+		reader:      r,
+		modTime:     modTime,
+		sess:        sess,
+	}, nil
+}
+
+// exitCode extracts the exit code from an SSH error.
+// For non-exit errors (e.g. network failures), returns 0 to match
+// ExecRunner and KICRunner behavior.
+func (*SSHRunner) exitCode(err error) int {
+	if exitError, ok := err.(*ssh.ExitError); ok {
+		return exitError.ExitStatus()
+	}
+	return 0
 }

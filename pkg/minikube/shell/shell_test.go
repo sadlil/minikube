@@ -31,19 +31,19 @@ func TestGenerateUsageHint(t *testing.T) {
 		{EnvConfig{""}, `# foo
 # eval $(bar)`},
 		{EnvConfig{"powershell"}, `# foo
-# & bar | Invoke-Expression`},
+# & bar --shell powershell | Invoke-Expression`},
 		{EnvConfig{"bash"}, `# foo
 # eval $(bar)`},
-		{EnvConfig{"powershell"}, `# foo
-# & bar | Invoke-Expression`},
+		{EnvConfig{"cmd"}, `REM foo
+REM @FOR /f "tokens=*" %i IN ('bar --shell cmd') DO @%i`},
 		{EnvConfig{"emacs"}, `;; foo
 ;; (with-temp-buffer (shell-command "bar" (current-buffer)) (eval-buffer))`},
 		{EnvConfig{"fish"}, `# foo
 # bar | source`},
 		{EnvConfig{"none"}, ``},
+		{EnvConfig{"tcsh"}, "\n: \"foo\"\n: eval `bar`\n"},
 	}
 	for _, tc := range testCases {
-		tc := tc
 		t.Run(tc.ec.Shell, func(t *testing.T) {
 			got := strings.TrimSpace(generateUsageHint(tc.ec, "foo", "bar"))
 			expected := strings.TrimSpace(tc.expected)
@@ -67,9 +67,9 @@ func TestCfgSet(t *testing.T) {
 		{"", "eval", EnvConfig{"emacs"}, `")`},
 		{"", "eval", EnvConfig{"none"}, ``},
 		{"", "eval", EnvConfig{"fish"}, `";`},
+		{"", "eval", EnvConfig{"tcsh"}, `";`},
 	}
 	for _, tc := range testCases {
-		tc := tc
 		t.Run(tc.ec.Shell, func(t *testing.T) {
 			conf := CfgSet(tc.ec, tc.plz, tc.cmd)
 			expected := strings.TrimSpace(tc.expected)
@@ -100,14 +100,14 @@ set -e bar;`},
 		{[]string{"baz", "bar"}, EnvConfig{"emacs"}, `(setenv "baz" nil)
 (setenv "bar" nil)`},
 		{[]string{"baz", "bar"}, EnvConfig{"none"}, "baz\nbar"},
+		{[]string{"baz", "bar"}, EnvConfig{"tcsh"}, "unsetenv baz;\nunsetenv bar;"},
 	}
 	for _, tc := range testCases {
-		tc := tc
 		t.Run(tc.ec.Shell, func(t *testing.T) {
 			var b bytes.Buffer
 
 			if err := UnsetScript(tc.ec, &b, tc.vars); err != nil {
-				t.Fatalf("Unexpected error when unseting script happen: %v", err)
+				t.Fatalf("Unexpected error when unsetting script happen: %v", err)
 			} else {
 				writtenMessage := strings.TrimSpace(b.String())
 				expected := strings.TrimSpace(tc.expected)
@@ -120,10 +120,7 @@ set -e bar;`},
 }
 
 func TestDetectSet(t *testing.T) {
-	orgShellEnv := os.Getenv("SHELL")
-	defer os.Setenv("SHELL", orgShellEnv)
-
-	os.Setenv("SHELL", "/bin/bash")
+	t.Setenv("SHELL", "/bin/bash")
 	if s, err := Detect(); err != nil {
 		t.Fatalf("unexpected error: '%v' during shell detection. Returned shell: %s", err, s)
 	} else if s == "" {
@@ -144,15 +141,11 @@ func TestDetectUnset(t *testing.T) {
 }
 
 func TestSetScript(t *testing.T) {
-	ec := EnvConfig{"bash"}
 	var w bytes.Buffer
-	if err := SetScript(ec, &w, "foo", nil); err != nil {
+	if err := SetScript(&w, "foo", nil); err != nil {
 		t.Fatalf("Unexpected error: '%v' during Setting script", err)
 	}
 	if w.String() != "foo" {
 		t.Fatalf("Expected foo writed by SetScript, but got '%v'", w.String())
-	}
-	if ec.Shell == "" {
-		t.Fatalf("Expected no empty shell")
 	}
 }

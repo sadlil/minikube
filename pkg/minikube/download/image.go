@@ -24,6 +24,9 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
+
+	"errors"
 
 	"github.com/cheggaaa/pb/v3"
 	"github.com/google/go-containerregistry/pkg/name"
@@ -31,10 +34,14 @@ import (
 	"github.com/google/go-containerregistry/pkg/v1/daemon"
 	"github.com/google/go-containerregistry/pkg/v1/remote"
 	"github.com/google/go-containerregistry/pkg/v1/tarball"
-	"github.com/pkg/errors"
+	"github.com/hashicorp/go-getter"
 	"k8s.io/klog/v2"
-	"k8s.io/minikube/pkg/minikube/constants"
+	"k8s.io/minikube/pkg/minikube/detect"
+	"k8s.io/minikube/pkg/minikube/image"
 	"k8s.io/minikube/pkg/minikube/localpath"
+	"k8s.io/minikube/pkg/minikube/out"
+	"k8s.io/minikube/pkg/minikube/out/register"
+	"k8s.io/minikube/pkg/version"
 )
 
 var (
@@ -46,7 +53,7 @@ var (
 
 // imagePathInCache returns path in local cache directory
 func imagePathInCache(img string) string {
-	f := filepath.Join(constants.KICCacheDir, path.Base(img)+".tar")
+	f := filepath.Join(detect.KICCacheDir(), path.Base(img)+".tar")
 	f = localpath.SanitizeCacheDir(f)
 	return f
 }
@@ -74,17 +81,45 @@ func ImageExistsInDaemon(img string) bool {
 	// Check if image exists locally
 	klog.Infof("Checking for %s in local docker daemon", img)
 	cmd := exec.Command("docker", "images", "--format", "{{.Repository}}:{{.Tag}}@{{.Digest}}")
-	if output, err := cmd.Output(); err == nil {
-		if strings.Contains(string(output), img) {
-			klog.Infof("Found %s in local docker daemon, skipping pull", img)
-			return true
-		}
+	output, err := cmd.Output()
+	if err != nil {
+		klog.Warningf("failed to list docker images: %v", err)
+		return false
 	}
-	// Else, pull it
-	return false
+	if !strings.Contains(string(output), image.TrimDockerIO(img)) {
+		return false
+	}
+	correctArch, err := isImageCorrectArch(img)
+	if err != nil {
+		klog.Warning(err)
+		return false
+	}
+	if !correctArch {
+		klog.Warningf("image %s is of wrong architecture", img)
+		return false
+	}
+	klog.Infof("Found %s in local docker daemon, skipping pull", img)
+	return true
 }
 
-var checkImageExistsInDaemon = ImageExistsInDaemon
+// isImageCorrectArch returns true if the image arch is the same as the binary
+// arch. This is needed to resolve
+// https://github.com/kubernetes/minikube/pull/19205
+func isImageCorrectArch(img string) (bool, error) {
+	ref, err := name.ParseReference(img)
+	if err != nil {
+		return false, fmt.Errorf("failed to parse reference: %v", err)
+	}
+	dImg, err := daemon.Image(ref)
+	if err != nil {
+		return false, fmt.Errorf("failed to get image from daemon: %v", err)
+	}
+	cfg, err := dImg.ConfigFile()
+	if err != nil {
+		return false, fmt.Errorf("failed to get config for %s: %v", img, err)
+	}
+	return cfg.Architecture == runtime.GOARCH, nil
+}
 
 // ImageToCache downloads img (if not present in cache) and writes it to the local cache directory
 func ImageToCache(img string) error {
@@ -105,7 +140,7 @@ func ImageToCache(img string) error {
 	}
 
 	if err := os.MkdirAll(filepath.Dir(f), 0777); err != nil {
-		return errors.Wrapf(err, "making cache image directory: %s", f)
+		return fmt.Errorf("making cache image directory: %s: %w", f, err)
 	}
 
 	if DownloadMock != nil {
@@ -113,13 +148,14 @@ func ImageToCache(img string) error {
 		return DownloadMock(img, f)
 	}
 
-	// buffered channel
-	c := make(chan v1.Update, 200)
-
 	klog.Infof("Writing %s to local cache", img)
 	ref, err := name.ParseReference(img)
 	if err != nil {
-		return errors.Wrap(err, "parsing reference")
+		return fmt.Errorf("parsing reference: %w", err)
+	}
+	tag, err := name.NewTag(image.Tag(img))
+	if err != nil {
+		return fmt.Errorf("parsing tag: %w", err)
 	}
 	klog.V(3).Infof("Getting image %v", ref)
 	i, err := remote.Image(ref, remote.WithPlatform(defaultPlatform))
@@ -132,165 +168,151 @@ func ImageToCache(img string) error {
 			return ErrNeedsLogin
 		}
 
-		return errors.Wrap(err, "getting remote image")
+		return fmt.Errorf("getting remote image: %w", err)
 	}
-	klog.V(3).Infof("Writing image %v", ref)
+	klog.V(3).Infof("Writing image %v", tag)
 	errchan := make(chan error)
-	p := pb.Full.Start64(0)
-	fn := strings.Split(ref.Name(), "@")[0]
-	// abbreviate filename for progress
-	maxwidth := 30 - len("...")
-	if len(fn) > maxwidth {
-		fn = fn[0:maxwidth] + "..."
-	}
-	p.Set("prefix", "    > "+fn+": ")
-	p.Set(pb.Bytes, true)
+	// buffered channel
+	c := make(chan v1.Update, 200)
+	var p *pb.ProgressBar
+	if out.JSON {
+		register.PrintDownloadProgress(img, "0")
+	} else {
+		// if we need to print progress bar to stdout
+		p = pb.Full.Start64(0)
+		fn := image.Tag(ref.Name())
+		// abbreviate filename for progress
+		maxwidth := 30 - len("...")
+		if len(fn) > maxwidth {
+			fn = fn[0:maxwidth] + "..."
+		}
+		p.Set("prefix", "    > "+fn+": ")
+		p.Set(pb.Bytes, true)
 
-	// Just a hair less than 80 (standard terminal width) for aesthetics & pasting into docs
-	p.SetWidth(79)
+		// Just a hair less than 80 (standard terminal width) for aesthetics & pasting into docs
+		p.SetWidth(79)
+	}
 
 	go func() {
-		err = tarball.WriteToFile(f, ref, i, tarball.WithProgress(c))
+		err = tarball.WriteToFile(f, tag, i, tarball.WithProgress(c))
 		errchan <- err
 	}()
 	var update v1.Update
+	previousTime := time.Now()
 	for {
 		select {
 		case update = <-c:
-			p.SetCurrent(update.Complete)
-			p.SetTotal(update.Total)
+			if out.JSON {
+				now := time.Now()
+				if update.Complete == update.Total || now.Sub(previousTime) > time.Second*5 {
+					register.PrintDownloadProgress(img, fmt.Sprintf("%f", float64(update.Complete)/float64(update.Total)))
+					previousTime = now
+				}
+			} else {
+				p.SetCurrent(update.Complete)
+				p.SetTotal(update.Total)
+			}
+
 		case err = <-errchan:
-			p.Finish()
+			if out.JSON {
+				register.PrintDownloadProgress(img, "1")
+			} else {
+				p.Finish()
+			}
 			if err != nil {
-				return errors.Wrap(err, "writing tarball image")
+				return fmt.Errorf("writing tarball image: %w", err)
 			}
 			return nil
 		}
 	}
 }
 
-func parseImage(img string) (*name.Tag, name.Reference, error) {
-	digest, err := name.NewDigest(img)
-	if err == nil {
-		tag := digest.Tag()
-		return &tag, digest, nil
-	}
+// GHKicbaseTarballToCache try to download the tarball of kicbase from github release.
+// This is the last resort, in case of all docker registry is not available.
+func GHKicbaseTarballToCache(kicBaseVersion string) (string, error) {
+	imageName := fmt.Sprintf("kicbase/stable:%s", kicBaseVersion)
+	f := imagePathInCache(imageName)
+	fileLock := f + ".lock"
 
-	_, ok := err.(*name.ErrBadName)
-	if !ok {
-		return nil, nil, errors.Wrap(err, "new ref")
-	}
-	// ErrBadName means img contains no digest
-	// It happens if its value is name:tag for example.
-	// In this case we want to give it a second chance and try to parse it one more time using name.NewTag(img)
-	tag, err := name.NewTag(img)
+	kicbaseArch := runtime.GOARCH
+
+	releaser, err := lockDownload(fileLock)
 	if err != nil {
-		return nil, nil, errors.Wrap(err, "failed to parse image reference")
+		return "", err
 	}
-	return &tag, tag, nil
+	if releaser != nil {
+		defer releaser.Release()
+	}
+	downloadURL := fmt.Sprintf("https://github.com/kubernetes/minikube/releases/download/%s/kicbase-%s-%s.tar",
+		version.GetVersion(),
+		kicBaseVersion, kicbaseArch)
+
+	// we don't want the tarball to be decompressed
+	// so we pass client options to suppress this behavior
+	if err := download(downloadURL, f, getter.WithDecompressors(map[string]getter.Decompressor{})); err != nil {
+		return "", err
+	}
+	return downloadURL, nil
+
+}
+
+func parseImage(img string) (*name.Tag, name.Reference, error) {
+
+	var ref name.Reference
+	tag, err := name.NewTag(image.Tag(img))
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to parse image reference: %w", err)
+	}
+	digest, err := name.NewDigest(img)
+	if err != nil {
+		_, ok := err.(*name.ErrBadName)
+		if !ok {
+			return nil, nil, fmt.Errorf("new ref: %w", err)
+		}
+		// ErrBadName means img contains no digest
+		// It happens if its value is name:tag for example.
+		ref = tag
+	} else {
+		ref = digest
+	}
+	return &tag, ref, nil
 }
 
 // CacheToDaemon loads image from tarball in the local cache directory to the local docker daemon
-func CacheToDaemon(img string) error {
+// It returns the img that was loaded into the daemon
+// If online it will be: image:tag@sha256
+// If offline it will be: image:tag
+func CacheToDaemon(img string) (string, error) {
 	p := imagePathInCache(img)
 
 	tag, ref, err := parseImage(img)
 	if err != nil {
-		return err
+		return "", err
 	}
 	// do not use cache if image is set in format <name>:latest
 	if _, ok := ref.(name.Tag); ok {
 		if tag.Name() == "latest" {
-			return fmt.Errorf("can't cache 'latest' tag")
+			return "", errors.New("can't cache 'latest' tag")
 		}
 	}
 
 	i, err := tarball.ImageFromPath(p, tag)
 	if err != nil {
-		return errors.Wrap(err, "tarball")
+		return "", fmt.Errorf("tarball: %w", err)
 	}
 
-	resp, err := daemon.Write(ref, i)
+	resp, err := daemon.Write(*tag, i)
 	klog.V(2).Infof("response: %s", resp)
-	return err
-}
-
-// ImageToDaemon downloads img (if not present in daemon) and writes it to the local docker daemon
-func ImageToDaemon(img string) error {
-	fileLock := filepath.Join(constants.KICCacheDir, path.Base(img)+".d.lock")
-	fileLock = localpath.SanitizeCacheDir(fileLock)
-
-	releaser, err := lockDownload(fileLock)
-	if releaser != nil {
-		defer releaser.Release()
-	}
 	if err != nil {
-		return err
+		return "", err
 	}
 
-	if checkImageExistsInDaemon(img) {
-		klog.Infof("%s exists in daemon, skipping pull", img)
-		return nil
-	}
-	// buffered channel
-	c := make(chan v1.Update, 200)
-
-	klog.Infof("Writing %s to local daemon", img)
-	ref, err := name.ParseReference(img)
-	if err != nil {
-		return errors.Wrap(err, "parsing reference")
+	platform := fmt.Sprintf("linux/%s", runtime.GOARCH)
+	cmd := exec.Command("docker", "pull", "--platform", platform, "--quiet", img)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		klog.Warningf("failed to pull image digest (expected if offline): %s: %v", output, err)
+		img = image.Tag(img)
 	}
 
-	if DownloadMock != nil {
-		klog.Infof("Mock download: %s -> daemon", img)
-		return DownloadMock(img, "daemon")
-	}
-
-	klog.V(3).Infof("Getting image %v", ref)
-	i, err := remote.Image(ref, remote.WithPlatform(defaultPlatform))
-	if err != nil {
-		if strings.Contains(err.Error(), "GitHub Docker Registry needs login") {
-			ErrGithubNeedsLogin := errors.New(err.Error())
-			return ErrGithubNeedsLogin
-		} else if strings.Contains(err.Error(), "UNAUTHORIZED") {
-			ErrNeedsLogin := errors.New(err.Error())
-			return ErrNeedsLogin
-		}
-
-		return errors.Wrap(err, "getting remote image")
-	}
-
-	klog.V(3).Infof("Writing image %v", ref)
-	errchan := make(chan error)
-	p := pb.Full.Start64(0)
-	fn := strings.Split(ref.Name(), "@")[0]
-	// abbreviate filename for progress
-	maxwidth := 30 - len("...")
-	if len(fn) > maxwidth {
-		fn = fn[0:maxwidth] + "..."
-	}
-	p.Set("prefix", "    > "+fn+": ")
-	p.Set(pb.Bytes, true)
-
-	// Just a hair less than 80 (standard terminal width) for aesthetics & pasting into docs
-	p.SetWidth(79)
-
-	go func() {
-		_, err = daemon.Write(ref, i, tarball.WithProgress(c))
-		errchan <- err
-	}()
-	var update v1.Update
-	for {
-		select {
-		case update = <-c:
-			p.SetCurrent(update.Complete)
-			p.SetTotal(update.Total)
-		case err = <-errchan:
-			p.Finish()
-			if err != nil {
-				return errors.Wrap(err, "writing daemon image")
-			}
-			return nil
-		}
-	}
+	return img, nil
 }

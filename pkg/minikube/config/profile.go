@@ -18,8 +18,8 @@ package config
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
-	"io/ioutil"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -28,11 +28,39 @@ import (
 	"github.com/spf13/viper"
 	"k8s.io/klog/v2"
 	"k8s.io/minikube/pkg/drivers/kic/oci"
+	"k8s.io/minikube/pkg/minikube/kubeconfig"
 	"k8s.io/minikube/pkg/minikube/localpath"
 	"k8s.io/minikube/pkg/util/lock"
 )
 
 var keywords = []string{"start", "stop", "status", "delete", "config", "open", "profile", "addons", "cache", "logs"}
+
+// ControlPlane returns the first available control-plane node or error, if none found.
+func ControlPlane(cc ClusterConfig) (Node, error) {
+	cps := ControlPlanes(cc)
+	if len(cps) == 0 {
+		return Node{}, errors.New("no control-plane nodes found")
+	}
+	return cps[0], nil
+}
+
+// ControlPlanes returns a list of control-plane nodes.
+func ControlPlanes(cc ClusterConfig) []Node {
+	cps := []Node{}
+	for _, n := range cc.Nodes {
+		if n.ControlPlane {
+			cps = append(cps, n)
+		}
+	}
+	return cps
+}
+
+// IsPrimaryControlPlane returns if node is primary control-plane node.
+func IsPrimaryControlPlane(cc ClusterConfig, node Node) bool {
+	// TODO (prezha): find where, for "none" driver, we set first (ie, primary control-plane) node name to "m01" - that should not happen but it's happening before pr #17909
+	// return node.ControlPlane && node.Name == ""
+	return len(cc.Nodes) > 0 && cc.Nodes[0].Name == node.Name
+}
 
 // IsValid checks if the profile has the essential info needed for a profile
 func (p *Profile) IsValid() bool {
@@ -48,38 +76,6 @@ func (p *Profile) IsValid() bool {
 		}
 	}
 	return true
-}
-
-// PrimaryControlPlane gets the node specific config for the first created control plane
-func PrimaryControlPlane(cc *ClusterConfig) (Node, error) {
-	for _, n := range cc.Nodes {
-		if n.ControlPlane {
-			return n, nil
-		}
-	}
-
-	// This config is probably from 1.6 or earlier, let's convert it.
-	cp := Node{
-		Name:              cc.KubernetesConfig.NodeName,
-		IP:                cc.KubernetesConfig.NodeIP,
-		Port:              cc.KubernetesConfig.NodePort,
-		KubernetesVersion: cc.KubernetesConfig.KubernetesVersion,
-		ControlPlane:      true,
-		Worker:            true,
-	}
-
-	cc.Nodes = []Node{cp}
-
-	// Remove old style attribute to avoid confusion
-	cc.KubernetesConfig.NodeName = ""
-	cc.KubernetesConfig.NodeIP = ""
-
-	err := SaveProfile(viper.GetString(ProfileName), cc)
-	if err != nil {
-		return Node{}, err
-	}
-
-	return cp, nil
 }
 
 // ProfileNameValid checks if the profile name is container name and DNS hostname/label friendly.
@@ -152,19 +148,16 @@ func SaveProfile(name string, cfg *ClusterConfig, miniHome ...string) error {
 
 	// If no config file exists, don't worry about swapping paths
 	if _, err := os.Stat(path); os.IsNotExist(err) {
-		if err := lock.WriteFile(path, data, 0600); err != nil {
-			return err
-		}
-		return nil
+		return lock.WriteFile(path, data, 0600)
 	}
 
-	tf, err := ioutil.TempFile(filepath.Dir(path), "config.json.tmp")
+	tf, err := os.CreateTemp(filepath.Dir(path), "config.json.tmp")
 	if err != nil {
 		return err
 	}
 	defer os.Remove(tf.Name())
 
-	if err = ioutil.WriteFile(tf.Name(), data, 0600); err != nil {
+	if err = os.WriteFile(tf.Name(), data, 0600); err != nil {
 		return err
 	}
 
@@ -176,11 +169,7 @@ func SaveProfile(name string, cfg *ClusterConfig, miniHome ...string) error {
 		return err
 	}
 
-	if err = os.Rename(tf.Name(), path); err != nil {
-		return err
-	}
-
-	return nil
+	return os.Rename(tf.Name(), path)
 }
 
 // DeleteProfile deletes a profile and removes the profile dir
@@ -201,7 +190,7 @@ var DockerContainers = func() ([]string, error) {
 // invalidPs are the profiles that have a directory or config file but not usable
 // invalidPs would be suggested to be deleted
 func ListProfiles(miniHome ...string) (validPs []*Profile, inValidPs []*Profile, err error) {
-
+	activeP := viper.GetString(ProfileName)
 	// try to get profiles list based on left over evidences such as directory
 	pDirs, err := profileDirs(miniHome...)
 	if err != nil {
@@ -213,6 +202,10 @@ func ListProfiles(miniHome ...string) (validPs []*Profile, inValidPs []*Profile,
 		pDirs = append(pDirs, cs...)
 	}
 
+	activeKubeContext, err := kubeconfig.GetCurrentContext(kubeconfig.PathFromEnv())
+	if err != nil {
+		return nil, nil, err
+	}
 	nodeNames := map[string]bool{}
 	for _, n := range removeDupes(pDirs) {
 		p, err := LoadProfile(n, miniHome...)
@@ -225,7 +218,12 @@ func ListProfiles(miniHome ...string) (validPs []*Profile, inValidPs []*Profile,
 			continue
 		}
 		validPs = append(validPs, p)
-
+		if p.Name == activeP {
+			p.Active = true
+		}
+		if p.Name == activeKubeContext {
+			p.ActiveKubeContext = true
+		}
 		for _, child := range p.Config.Nodes {
 			nodeNames[MachineName(*p.Config, child)] = true
 		}
@@ -236,17 +234,20 @@ func ListProfiles(miniHome ...string) (validPs []*Profile, inValidPs []*Profile,
 }
 
 // ListValidProfiles returns profiles in minikube home dir
-// Unlike `ListProfiles` this function doens't try to get profile from container
+// Unlike `ListProfiles` this function doesn't try to get profile from container
 func ListValidProfiles(miniHome ...string) (ps []*Profile, err error) {
 	// try to get profiles list based on left over evidences such as directory
 	pDirs, err := profileDirs(miniHome...)
 	if err != nil {
 		return nil, err
 	}
-
+	activeP := viper.GetString(ProfileName)
 	for _, n := range pDirs {
 		p, err := LoadProfile(n, miniHome...)
 		if err == nil && p.IsValid() {
+			if p.Name == activeP {
+				p.Active = true
+			}
 			ps = append(ps, p)
 		}
 	}
@@ -259,15 +260,15 @@ func removeDupes(profiles []string) []string {
 	seen := map[string]bool{}
 	result := []string{}
 
-	for n := range profiles {
-		if seen[profiles[n]] {
-			// Do not add duplicate.
-		} else {
-			// Record this element as an encountered element.
-			seen[profiles[n]] = true
-			// Append to result slice.
-			result = append(result, profiles[n])
+	for _, profile := range profiles {
+		if seen[profile] {
+			// Do not add duplicates.
+			continue
 		}
+		// Record this element as an encountered element.
+		seen[profile] = true
+		// Append to result slice.
+		result = append(result, profile)
 	}
 	// Return the new slice.
 	return result
@@ -287,7 +288,7 @@ func removeChildNodes(inValidPs []*Profile, nodeNames map[string]bool) (ps []*Pr
 
 // LoadProfile loads type Profile based on its name
 func LoadProfile(name string, miniHome ...string) (*Profile, error) {
-	cfg, err := DefaultLoader.LoadConfigFromFile(name, miniHome...)
+	cfg, err := Load(name, miniHome...)
 	p := &Profile{
 		Name:   name,
 		Config: cfg,
@@ -302,7 +303,11 @@ func profileDirs(miniHome ...string) (dirs []string, err error) {
 		miniPath = miniHome[0]
 	}
 	pRootDir := filepath.Join(miniPath, "profiles")
-	items, err := ioutil.ReadDir(pRootDir)
+	items, err := os.ReadDir(pRootDir)
+	if os.IsNotExist(err) {
+		return dirs, &ErrNotExist{fmt.Sprintf("profiles dir %s does not exist", pRootDir)}
+	}
+
 	for _, f := range items {
 		if f.IsDir() {
 			dirs = append(dirs, f.Name())
@@ -333,7 +338,7 @@ func ProfileFolderPath(profile string, miniHome ...string) string {
 // MachineName returns the name of the machine, as seen by the hypervisor given the cluster and node names
 func MachineName(cc ClusterConfig, n Node) string {
 	// For single node cluster, default to back to old naming
-	if (len(cc.Nodes) == 1 && cc.Nodes[0].Name == n.Name) || n.ControlPlane {
+	if (len(cc.Nodes) == 1 && cc.Nodes[0].Name == n.Name) || n.Name == "" {
 		return cc.Name
 	}
 	return fmt.Sprintf("%s-%s", cc.Name, n.Name)

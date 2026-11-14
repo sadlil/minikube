@@ -1,4 +1,4 @@
-// +build integration
+//go:build integration
 
 /*
 Copyright 2020 The Kubernetes Authors All rights reserved.
@@ -20,68 +20,105 @@ package integration
 
 import (
 	"context"
-	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"k8s.io/minikube/pkg/minikube/constants"
+	"k8s.io/minikube/pkg/minikube/download"
 )
 
-// TestPreload verifies the preload tarballs get pulled in properly by minikube
+// TestPreload verifies that disabling the initial preload, pulling a specific image,
+// and restarting the cluster preserves the image across restarts. It also verifies
+// that preloads can be downloaded from the selected source.
 func TestPreload(t *testing.T) {
+	MaybeParallel(t)
 	if NoneDriver() {
 		t.Skipf("skipping %s - incompatible with none driver", t.Name())
-	}
-
-	if arm64Platform() {
-		t.Skipf("skipping %s - not yet supported on arm64. See https://github.com/kubernetes/minikube/issues/10144", t.Name())
 	}
 
 	profile := UniqueProfileName("test-preload")
 	ctx, cancel := context.WithTimeout(context.Background(), Minutes(40))
 	defer CleanupWithLogs(t, profile, cancel)
 
-	startArgs := []string{"start", "-p", profile, "--memory=2200", "--alsologtostderr", "--wait=true", "--preload=false"}
-	startArgs = append(startArgs, StartArgs()...)
-	k8sVersion := "v1.17.0"
-	startArgs = append(startArgs, fmt.Sprintf("--kubernetes-version=%s", k8sVersion))
+	userImage := busyboxImage
 
-	rr, err := Run(t, exec.CommandContext(ctx, Target(), startArgs...))
-	if err != nil {
-		t.Fatalf("%s failed: %v", rr.Command(), err)
+	// These subtests run sequentially (t.Run blocks until completion) to share the same profile/cluster state.
+	if t.Run("Start-NoPreload-PullImage", func(t *testing.T) {
+		startArgs := []string{"start", "-p", profile, "--memory=3072", "--alsologtostderr", "--wait=true", "--preload=false"}
+		startArgs = append(startArgs, StartArgs()...)
+
+		rr, err := Run(t, exec.CommandContext(ctx, Target(), startArgs...))
+		if err != nil {
+			t.Fatalf("%s failed: %v", rr.Command(), err)
+		}
+
+		// Now, pull the busybox image into minikube
+		cmd := exec.CommandContext(ctx, Target(), "-p", profile, "image", "pull", userImage)
+		rr, err = Run(t, cmd)
+		if err != nil {
+			t.Fatalf("%s failed: %v", rr.Command(), err)
+		}
+
+		// stop the cluster
+		rr, err = Run(t, exec.CommandContext(ctx, Target(), "stop", "-p", profile))
+		if err != nil {
+			t.Fatalf("%s failed: %v", rr.Command(), err)
+		}
+	}) {
+		t.Run("Restart-With-Preload-Check-User-Image", func(t *testing.T) {
+			// containerd preload overwrites /var and drops user images; unlike docker
+			// and cri-o it has no backup/restore yet (#22269), so this check can't pass.
+			if ContainerRuntime() == constants.Containerd {
+				t.Skip("containerd preload drops user images, see https://github.com/kubernetes/minikube/issues/23035")
+			}
+			// re-start the cluster and check if image is preserved with enabled preload
+			startArgs := []string{"start", "-p", profile, "--preload=true", "--alsologtostderr", "-v=1", "--wait=true"}
+			startArgs = append(startArgs, StartArgs()...)
+			rr, err := Run(t, exec.CommandContext(ctx, Target(), startArgs...))
+			if err != nil {
+				t.Fatalf("%s failed: %v", rr.Command(), err)
+			}
+			cmd := exec.CommandContext(ctx, Target(), "-p", profile, "image", "list")
+			rr, err = Run(t, cmd)
+			if err != nil {
+				t.Fatalf("%s failed: %v", rr.Command(), err)
+			}
+			if !strings.Contains(rr.Output(), userImage) {
+				t.Fatalf("Expected to find %s in image list output, instead got %s", userImage, rr.Output())
+			}
+		})
 	}
 
-	// Now, pull the busybox image into minikube
-	image := "busybox"
-	var cmd *exec.Cmd
-	if ContainerRuntime() == "docker" {
-		cmd = exec.CommandContext(ctx, Target(), "ssh", "-p", profile, "--", "docker", "pull", image)
-	} else {
-		cmd = exec.CommandContext(ctx, Target(), "ssh", "-p", profile, "--", "sudo", "crictl", "pull", image)
-	}
-	rr, err = Run(t, cmd)
-	if err != nil {
-		t.Fatalf("%s failed: %v", rr.Command(), err)
-	}
+	// PreloadSrc verifies that --preload-source=github downloads a preload.
+	t.Run("PreloadSrc", func(t *testing.T) {
+		MaybeParallel(t)
+		containerRuntime := ContainerRuntime()
+		preloadDir := t.TempDir()
 
-	// Restart minikube with v1.17.3, which has a preloaded tarball
-	startArgs = []string{"start", "-p", profile, "--memory=2200", "--alsologtostderr", "-v=1", "--wait=true"}
-	startArgs = append(startArgs, StartArgs()...)
-	k8sVersion = "v1.17.3"
-	startArgs = append(startArgs, fmt.Sprintf("--kubernetes-version=%s", k8sVersion))
-	rr, err = Run(t, exec.CommandContext(ctx, Target(), startArgs...))
-	if err != nil {
-		t.Fatalf("%s failed: %v", rr.Command(), err)
-	}
-	if ContainerRuntime() == "docker" {
-		cmd = exec.CommandContext(ctx, Target(), "ssh", "-p", profile, "--", "docker", "images")
-	} else {
-		cmd = exec.CommandContext(ctx, Target(), "ssh", "-p", profile, "--", "sudo", "crictl", "image", "ls")
-	}
-	rr, err = Run(t, cmd)
-	if err != nil {
-		t.Fatalf("%s failed: %v", rr.Command(), err)
-	}
-	if !strings.Contains(rr.Output(), image) {
-		t.Fatalf("Expected to find %s in output of `docker images`, instead got %s", image, rr.Output())
-	}
+		profile := UniqueProfileName("test-preload-dl-github")
+		ctx, cancel := context.WithTimeout(context.Background(), Minutes(10))
+		// --download-only does not create a cluster or profile, so CleanupWithLogs is not needed.
+		defer cancel()
+
+		startArgs := []string{"start", "-p", profile, "--download-only", "--kubernetes-version", constants.DefaultKubernetesVersion, "--preload-source=github", "--alsologtostderr", "--v=1"}
+		startArgs = append(startArgs, StartArgs()...)
+
+		cmd := exec.CommandContext(ctx, Target(), startArgs...)
+		cmd.Env = append(os.Environ(), download.TestPreloadsEnv+"="+preloadDir)
+		rr, err := Run(t, cmd)
+		if err != nil {
+			t.Fatalf("%s failed: %v", rr.Command(), err)
+		}
+		preloadPath := filepath.Join(preloadDir, download.TarballName(constants.DefaultKubernetesVersion, containerRuntime))
+		info, err := os.Stat(preloadPath)
+		if err != nil {
+			t.Fatalf("expected preload to be downloaded to %s, got stat error: %v", preloadPath, err)
+		}
+		if info.Size() == 0 {
+			t.Fatalf("expected downloaded preload to be non-empty: %s", preloadPath)
+		}
+	})
 }

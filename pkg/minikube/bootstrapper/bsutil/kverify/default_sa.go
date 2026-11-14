@@ -19,23 +19,23 @@ package kverify
 
 import (
 	"context"
+	"fmt"
 	"time"
 
-	"github.com/pkg/errors"
 	meta "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/klog/v2"
-	kconst "k8s.io/kubernetes/cmd/kubeadm/app/constants"
+	kconst "k8s.io/minikube/third_party/kubeadm/app/constants"
 )
 
 // WaitForDefaultSA waits for the default service account to be created.
 func WaitForDefaultSA(cs *kubernetes.Clientset, timeout time.Duration) error {
 	klog.Info("waiting for default service account to be created ...")
 	start := time.Now()
-	saReady := func() (bool, error) {
+	saReady := func(ctx context.Context) (bool, error) {
 		// equivalent to manual check of 'kubectl --context profile get serviceaccount default'
-		sas, err := cs.CoreV1().ServiceAccounts("default").List(context.Background(), meta.ListOptions{})
+		sas, err := cs.CoreV1().ServiceAccounts("default").List(ctx, meta.ListOptions{})
 		if err != nil {
 			klog.Infof("temporary error waiting for default SA: %v", err)
 			return false, nil
@@ -48,8 +48,8 @@ func WaitForDefaultSA(cs *kubernetes.Clientset, timeout time.Duration) error {
 		}
 		return false, nil
 	}
-	if err := wait.PollImmediate(kconst.APICallRetryInterval, timeout, saReady); err != nil {
-		return errors.Wrapf(err, "waited %s for SA", time.Since(start))
+	if err := wait.PollUntilContextTimeout(context.Background(), kconst.APICallRetryInterval, timeout, true, saReady); err != nil {
+		return fmt.Errorf("waited %s for SA: %w", time.Since(start), err)
 	}
 
 	klog.Infof("duration metric: took %s for default service account to be created ...", time.Since(start))

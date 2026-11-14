@@ -18,17 +18,19 @@ package cruntime
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"os/exec"
 	"strings"
 	"testing"
 
+	"github.com/blang/semver/v4"
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
-	"github.com/pkg/errors"
 	"k8s.io/klog/v2"
 	"k8s.io/minikube/pkg/minikube/assets"
 	"k8s.io/minikube/pkg/minikube/command"
+	"k8s.io/minikube/pkg/minikube/constants"
 )
 
 func TestName(t *testing.T) {
@@ -36,7 +38,7 @@ func TestName(t *testing.T) {
 		runtime string
 		want    string
 	}{
-		{"", "Docker"},
+		{"", "Docker"}, // pre-2022 stored empty; not the product default
 		{"docker", "Docker"},
 		{"crio", "CRI-O"},
 		{"cri-o", "CRI-O"},
@@ -51,6 +53,34 @@ func TestName(t *testing.T) {
 			got := r.Name()
 			if got != tc.want {
 				t.Errorf("Name(%s) = %q, want: %q", tc.runtime, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestDefaultDockerSocketPath(t *testing.T) {
+	var tests = []struct {
+		version string
+		want    string
+	}{
+		{"1.20.0", InternalDockerCRISocket},
+		{"1.21.3", InternalDockerCRISocket},
+		{"1.23.0", InternalDockerCRISocket},
+		{"1.24.0-alpha.0", ExternalDockerCRISocket},
+		{"1.24.0-beta.0", ExternalDockerCRISocket},
+		{"1.24.6", ExternalDockerCRISocket},
+	}
+	for _, tc := range tests {
+		runtime := "docker"
+		version := semver.MustParse(tc.version)
+		t.Run(runtime, func(t *testing.T) {
+			r, err := New(Config{Type: runtime, KubernetesVersion: version})
+			if err != nil {
+				t.Fatalf("New(%s): %v", tc.version, err)
+			}
+			got := r.SocketPath()
+			if got != tc.want {
+				t.Errorf("SocketPath(%s) = %q, want: %q", tc.version, got, tc.want)
 			}
 		})
 	}
@@ -118,32 +148,35 @@ func TestCGroupDriver(t *testing.T) {
 func TestKubeletOptions(t *testing.T) {
 	var tests = []struct {
 		runtime string
+		version string
 		want    map[string]string
 	}{
-		{"docker", map[string]string{"container-runtime": "docker"}},
-		{"crio", map[string]string{
-			"container-runtime":          "remote",
-			"container-runtime-endpoint": "/var/run/crio/crio.sock",
-			"image-service-endpoint":     "/var/run/crio/crio.sock",
-			"runtime-request-timeout":    "15m",
+		{"docker", "1.23.0", map[string]string{"container-runtime": "docker"}},
+		{"docker", "1.24.0", map[string]string{
+			"container-runtime-endpoint": "unix:///var/run/cri-dockerd.sock",
 		}},
-		{"containerd", map[string]string{
+		{"crio", "1.25.0", map[string]string{
+			"container-runtime-endpoint": "unix:///var/run/crio/crio.sock",
+		}},
+		{"containerd", "1.23.0", map[string]string{
 			"container-runtime":          "remote",
 			"container-runtime-endpoint": "unix:///run/containerd/containerd.sock",
-			"image-service-endpoint":     "unix:///run/containerd/containerd.sock",
-			"runtime-request-timeout":    "15m",
+		}},
+		{"containerd", "1.24.0", map[string]string{
+			"container-runtime-endpoint": "unix:///run/containerd/containerd.sock",
 		}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.runtime, func(t *testing.T) {
-			r, err := New(Config{Type: tc.runtime})
+			kv := semver.MustParse(tc.version)
+			r, err := New(Config{Type: tc.runtime, KubernetesVersion: kv})
 			if err != nil {
-				t.Fatalf("New(%s): %v", tc.runtime, err)
+				t.Fatalf("New(%s, %s): %v", tc.runtime, tc.version, err)
 			}
 
 			got := r.KubeletOptions()
 			if diff := cmp.Diff(tc.want, got); diff != "" {
-				t.Errorf("KubeletOptions(%s) returned diff (-want +got):\n%s", tc.runtime, diff)
+				t.Errorf("KubeletOptions(%s, %s) returned diff (-want +got):\n%s", tc.runtime, tc.version, diff)
 			}
 		})
 	}
@@ -185,7 +218,7 @@ func buffer(s string, err error) (*command.RunResult, error) {
 	var buf bytes.Buffer
 	_, err = buf.WriteString(s)
 	if err != nil {
-		return rr, errors.Wrap(err, "Writing outStr to FakeRunner's buffer")
+		return rr, fmt.Errorf("Writing outStr to FakeRunner's buffer: %w", err)
 	}
 	rr.Stdout = buf
 	rr.Stderr = buf
@@ -224,11 +257,11 @@ func (f *FakeRunner) RunCmd(cmd *exec.Cmd) (*command.RunResult, error) {
 	}
 }
 
-func (f *FakeRunner) StartCmd(cmd *exec.Cmd) (*command.StartedCmd, error) {
+func (f *FakeRunner) StartCmd(_ *exec.Cmd) (*command.StartedCmd, error) {
 	return &command.StartedCmd{}, nil
 }
 
-func (f *FakeRunner) WaitCmd(sc *command.StartedCmd) (*command.RunResult, error) {
+func (f *FakeRunner) WaitCmd(_ *command.StartedCmd) (*command.RunResult, error) {
 	return &command.RunResult{}, nil
 }
 
@@ -236,8 +269,16 @@ func (f *FakeRunner) Copy(assets.CopyableFile) error {
 	return nil
 }
 
+func (f *FakeRunner) CopyFrom(assets.CopyableFile) error {
+	return nil
+}
+
 func (f *FakeRunner) Remove(assets.CopyableFile) error {
 	return nil
+}
+
+func (f *FakeRunner) ReadableFile(_ string) (assets.ReadableFile, error) {
+	return nil, nil
 }
 
 func (f *FakeRunner) dockerPs(args []string) (string, error) {
@@ -259,11 +300,11 @@ func (f *FakeRunner) dockerPs(args []string) (string, error) {
 }
 
 func (f *FakeRunner) dockerStop(args []string) (string, error) {
-	ids := strings.Split(args[1], " ")
-	for _, id := range ids {
+	ids := strings.SplitSeq(args[1], " ")
+	for id := range ids {
 		f.t.Logf("fake docker: Stopping id %q", id)
 		if f.containers[id] == "" {
-			return "", fmt.Errorf("no such container")
+			return "", errors.New("no such container")
 		}
 		delete(f.containers, id)
 	}
@@ -275,7 +316,7 @@ func (f *FakeRunner) dockerRm(args []string) (string, error) {
 	for _, id := range args[2:] {
 		f.t.Logf("fake docker: Removing id %q", id)
 		if f.containers[id] == "" {
-			return "", fmt.Errorf("no such container")
+			return "", errors.New("no such container")
 		}
 		delete(f.containers, id)
 	}
@@ -298,7 +339,7 @@ func (f *FakeRunner) dockerRmi(args []string) (string, error) {
 	for _, id := range args[1:] {
 		f.t.Logf("fake docker: Removing id %q", id)
 		if f.images[id] == "" {
-			return "", fmt.Errorf("no such image")
+			return "", errors.New("no such image")
 		}
 		delete(f.images, id)
 	}
@@ -379,7 +420,7 @@ func (f *FakeRunner) containerd(args []string, _ bool) (string, error) {
 		return "containerd github.com/containerd/containerd v1.2.0 c4446665cb9c30056f4998ed953e6d4ff22c7c39", nil
 	}
 	if args[0] != "--version" { // doing this to suppress lint "result 1 (error) is always nil"
-		return "", fmt.Errorf("unknown args[0]")
+		return "", errors.New("unknown args[0]")
 	}
 	return "", nil
 }
@@ -387,6 +428,9 @@ func (f *FakeRunner) containerd(args []string, _ bool) (string, error) {
 // crictl is a fake implementation of crictl
 func (f *FakeRunner) crictl(args []string, _ bool) (string, error) {
 	f.t.Logf("crictl args: %s", args)
+	if len(args) > 0 && strings.HasPrefix(args[0], "--timeout=") {
+		args = args[1:]
+	}
 	switch cmd := args[0]; cmd {
 	case "info":
 		return `{
@@ -424,18 +468,18 @@ func (f *FakeRunner) crictl(args []string, _ bool) (string, error) {
 			return strings.Join(ids, "\n"), nil
 		}
 	case "stop":
-		for _, id := range args[1:] {
+		for _, id := range args[2:] {
 			f.t.Logf("fake crictl: Stopping id %q", id)
 			if f.containers[id] == "" {
-				return "", fmt.Errorf("no such container")
+				return "", errors.New("no such container")
 			}
 			delete(f.containers, id)
 		}
 	case "rm":
-		for _, id := range args[1:] {
+		for _, id := range args[2:] {
 			f.t.Logf("fake crictl: Removing id %q", id)
 			if f.containers[id] == "" {
-				return "", fmt.Errorf("no such container")
+				return "", errors.New("no such container")
 			}
 			delete(f.containers, id)
 
@@ -444,7 +488,7 @@ func (f *FakeRunner) crictl(args []string, _ bool) (string, error) {
 		for _, id := range args[1:] {
 			f.t.Logf("fake crictl: Removing id %q", id)
 			if f.images[id] == "" {
-				return "", fmt.Errorf("no such image")
+				return "", errors.New("no such image")
 			}
 			delete(f.images, id)
 		}
@@ -495,25 +539,25 @@ func (f *FakeRunner) systemctl(args []string, root bool) (string, error) { // no
 		switch action {
 		case "stop":
 			if !root {
-				return out, fmt.Errorf("not root")
+				return out, errors.New("not root")
 			}
 			f.services[svc] = SvcExited
 			f.t.Logf("fake systemctl: stopped %s", svc)
 		case "start":
 			if !root {
-				return out, fmt.Errorf("not root")
+				return out, errors.New("not root")
 			}
 			f.services[svc] = SvcRunning
 			f.t.Logf("fake systemctl: started %s", svc)
 		case "restart":
 			if !root {
-				return out, fmt.Errorf("not root")
+				return out, errors.New("not root")
 			}
 			f.services[svc] = SvcRestarted
 			f.t.Logf("fake systemctl: SvcRestarted %s", svc)
 		case "is-active":
 			f.t.Logf("fake systemctl: %s is-status: %v", svc, state)
-			if state == SvcRunning {
+			if state == SvcRunning || state == SvcRestarted {
 				return out, nil
 			}
 			return out, fmt.Errorf("%s in state: %v", svc, state)
@@ -531,7 +575,9 @@ func (f *FakeRunner) systemctl(args []string, root bool) (string, error) { // no
 		case "disable":
 		case "mask":
 		case "unmask":
+		case "reset-failed":
 			f.t.Logf("fake systemctl: %s %s: %v", svc, action, state)
+
 		default:
 			return out, fmt.Errorf("unimplemented fake action: %q", action)
 		}
@@ -575,6 +621,7 @@ func TestVersion(t *testing.T) {
 // defaultServices reflects the default boot state for the minikube VM
 var defaultServices = map[string]serviceState{
 	"docker":        SvcRunning,
+	"docker.socket": SvcRunning,
 	"crio":          SvcExited,
 	"crio-shutdown": SvcExited,
 	"containerd":    SvcExited,
@@ -583,6 +630,7 @@ var defaultServices = map[string]serviceState{
 // allServices reflects the state of all actual services running at once
 var allServices = map[string]serviceState{
 	"docker":        SvcRunning,
+	"docker.socket": SvcRunning,
 	"crio":          SvcRunning,
 	"crio-shutdown": SvcExited,
 	"containerd":    SvcRunning,
@@ -593,7 +641,7 @@ func TestDisable(t *testing.T) {
 		runtime string
 		want    []string
 	}{
-		{"docker", []string{"sudo", "systemctl", "stop", "-f", "docker.socket", "sudo", "systemctl", "stop", "-f", "docker.service",
+		{"docker", []string{"sudo", "systemctl", "stop", "-f", "cri-docker.socket", "sudo", "systemctl", "stop", "-f", "cri-docker.service", "sudo", "systemctl", "disable", "cri-docker.socket", "sudo", "systemctl", "mask", "cri-docker.service", "sudo", "systemctl", "stop", "-f", "docker.socket", "sudo", "systemctl", "stop", "-f", "docker.service",
 			"sudo", "systemctl", "disable", "docker.socket", "sudo", "systemctl", "mask", "docker.service"}},
 		{"crio", []string{"sudo", "systemctl", "stop", "-f", "crio"}},
 		{"containerd", []string{"sudo", "systemctl", "stop", "-f", "containerd"}},
@@ -621,41 +669,46 @@ func TestDisable(t *testing.T) {
 
 func TestEnable(t *testing.T) {
 	var tests = []struct {
-		runtime  string
-		services map[string]serviceState
-		want     map[string]serviceState
+		description string
+		runtime     string
+		services    map[string]serviceState
+		want        map[string]serviceState
 	}{
-		{"docker", defaultServices,
-			map[string]serviceState{
-				"docker":        SvcRunning,
-				"containerd":    SvcExited,
-				"crio":          SvcExited,
-				"crio-shutdown": SvcExited,
-			}},
-		{"docker", allServices,
+		{"DockerDefaultServices", "docker", defaultServices,
 			map[string]serviceState{
 				"docker":        SvcRestarted,
+				"docker.socket": SvcRunning,
 				"containerd":    SvcExited,
 				"crio":          SvcExited,
 				"crio-shutdown": SvcExited,
 			}},
-		{"containerd", defaultServices,
+		{"DockerAllServices", "docker", allServices,
+			map[string]serviceState{
+				"docker":        SvcRestarted,
+				"docker.socket": SvcRunning,
+				"containerd":    SvcExited,
+				"crio":          SvcExited,
+				"crio-shutdown": SvcExited,
+			}},
+		{"ContainerdDefaultServices", "containerd", defaultServices,
 			map[string]serviceState{
 				"docker":        SvcExited,
+				"docker.socket": SvcExited,
 				"containerd":    SvcRestarted,
 				"crio":          SvcExited,
 				"crio-shutdown": SvcExited,
 			}},
-		{"crio", defaultServices,
+		{"CrioServices", "crio", defaultServices,
 			map[string]serviceState{
 				"docker":        SvcExited,
+				"docker.socket": SvcExited,
 				"containerd":    SvcExited,
-				"crio":          SvcRunning,
+				"crio":          SvcRestarted,
 				"crio-shutdown": SvcExited,
 			}},
 	}
 	for _, tc := range tests {
-		t.Run(tc.runtime, func(t *testing.T) {
+		t.Run(tc.description, func(t *testing.T) {
 			runner := NewFakeRunner(t)
 			for k, v := range tc.services {
 				runner.services[k] = v
@@ -664,7 +717,7 @@ func TestEnable(t *testing.T) {
 			if err != nil {
 				t.Fatalf("New(%s): %v", tc.runtime, err)
 			}
-			err = cr.Enable(true, false)
+			err = cr.Enable(true, constants.CgroupfsCgroupDriver, false)
 			if err != nil {
 				t.Errorf("%s disable unexpected error: %v", tc.runtime, err)
 			}

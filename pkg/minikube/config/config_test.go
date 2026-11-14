@@ -19,7 +19,6 @@ package config
 import (
 	"bytes"
 	"fmt"
-	"io/ioutil"
 	"os"
 	"reflect"
 	"testing"
@@ -144,9 +143,13 @@ func TestReadConfig(t *testing.T) {
 }
 
 func TestWriteConfig(t *testing.T) {
-	configFile, err := ioutil.TempFile("/tmp", "configTest")
+	tmpDir := t.TempDir()
+	configFile, err := os.CreateTemp(tmpDir, "configTest")
 	if err != nil {
 		t.Fatalf("Error not expected but got %v", err)
+	}
+	if err := configFile.Close(); err != nil {
+		t.Fatalf("failed to close temp file: %v", err)
 	}
 
 	cfg := map[string]interface{}{
@@ -161,7 +164,6 @@ func TestWriteConfig(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Error not expected but got %v", err)
 	}
-	defer os.Remove(configFile.Name())
 
 	mkConfig, err := ReadConfig(configFile.Name())
 	if err != nil {

@@ -17,15 +17,15 @@ limitations under the License.
 package machine
 
 import (
+	"fmt"
 	"time"
 
-	"github.com/docker/machine/libmachine"
-	"github.com/docker/machine/libmachine/host"
-	"github.com/docker/machine/libmachine/mcnerror"
-	"github.com/docker/machine/libmachine/state"
-	"github.com/pkg/errors"
 	"k8s.io/klog/v2"
 	"k8s.io/minikube/pkg/drivers/kic/oci"
+	"k8s.io/minikube/pkg/libmachine"
+	"k8s.io/minikube/pkg/libmachine/host"
+	"k8s.io/minikube/pkg/libmachine/mcnerror"
+	"k8s.io/minikube/pkg/libmachine/state"
 	"k8s.io/minikube/pkg/minikube/driver"
 	"k8s.io/minikube/pkg/minikube/out"
 	"k8s.io/minikube/pkg/minikube/out/register"
@@ -39,7 +39,7 @@ func StopHost(api libmachine.API, machineName string) error {
 	klog.Infof("StopHost: %v", machineName)
 	h, err := api.Load(machineName)
 	if err != nil {
-		return errors.Wrapf(err, "load")
+		return fmt.Errorf("load: %w", err)
 	}
 
 	out.Step(style.Stopping, `Stopping node "{{.name}}"  ...`, out.V{"name": machineName})
@@ -49,9 +49,16 @@ func StopHost(api libmachine.API, machineName string) error {
 // stop forcibly stops a host without needing to load
 func stop(h *host.Host) error {
 	start := time.Now()
+
+	if driver.IsVM(h.DriverName) {
+		if err := backup(*h, []string{"/etc/cni", "/etc/kubernetes"}); err != nil {
+			klog.Warningf("failed to complete vm config backup (will continue): %v", err)
+		}
+	}
+
 	if driver.NeedsShutdown(h.DriverName) {
 		if err := trySSHPowerOff(h); err != nil {
-			return errors.Wrap(err, "ssh power off")
+			return fmt.Errorf("ssh power off: %w", err)
 		}
 	}
 
@@ -62,9 +69,10 @@ func stop(h *host.Host) error {
 			klog.Infof("host is already stopped")
 			return nil
 		}
-		return &retry.RetriableError{Err: errors.Wrap(err, "stop")}
+		return &retry.RetriableError{Err: fmt.Errorf("stop: %w", err)}
 	}
-	klog.Infof("duration metric: stop complete within %s", time.Since(start))
+
+	klog.Infof("duration metric: took %s to stop", time.Since(start))
 	return nil
 }
 
@@ -82,14 +90,14 @@ func trySSHPowerOff(h *host.Host) error {
 
 	register.Reg.SetStep(register.PowerOff)
 	out.Step(style.Shutdown, `Powering off "{{.profile_name}}" via SSH ...`, out.V{"profile_name": h.Name})
-	// differnet for kic because RunSSHCommand is not implemented by kic
+	// different for kic because RunSSHCommand is not implemented by kic
 	if driver.IsKIC(h.DriverName) {
 		err := oci.ShutDown(h.DriverName, h.Name)
 		klog.Infof("shutdown container: err=%v", err)
 	} else {
-		out, err := h.RunSSHCommand("sudo poweroff")
+		rest, err := h.RunSSHCommand("sudo poweroff")
 		// poweroff always results in an error, since the host disconnects.
-		klog.Infof("poweroff result: out=%s, err=%v", out, err)
+		klog.Infof("poweroff result: out=%s, err=%v", rest, err)
 	}
 	return nil
 }

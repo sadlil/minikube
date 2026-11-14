@@ -18,6 +18,7 @@ package audit
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 )
 
@@ -30,13 +31,12 @@ type RawReport struct {
 // Report is created using the last n lines from the log file.
 func Report(lastNLines int) (*RawReport, error) {
 	if lastNLines <= 0 {
-		return nil, fmt.Errorf("last n lines must be 1 or greater")
+		return nil, errors.New("last n lines must be 1 or greater")
 	}
-	if currentLogFile == nil {
-		if err := setLogFile(); err != nil {
-			return nil, fmt.Errorf("failed to set the log file: %v", err)
-		}
+	if err := openAuditLog(); err != nil {
+		return nil, err
 	}
+	defer closeAuditLog()
 	var logs []string
 	s := bufio.NewScanner(currentLogFile)
 	for s.Scan() {

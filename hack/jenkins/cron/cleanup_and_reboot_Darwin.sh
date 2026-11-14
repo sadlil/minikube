@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/bin/bash
 
 # Copyright 2019 The Kubernetes Authors All rights reserved.
 #
@@ -18,18 +18,24 @@
 set -uf -o pipefail
 
 PATH=/usr/local/bin:/sbin:/usr/local/sbin:$PATH
+if [ "$(uname -p)" = "arm" ]; then
+  PATH=$PATH:/opt/homebrew/bin
+fi
 
 # cleanup shared between Linux and macOS
 function check_jenkins() {
   jenkins_pid="$(pidof java)"
-  if [[ "${jenkins_pid}" = "" ]]; then
+  if [ "${jenkins_pid}" = "" ]; then
           return
   fi
   pstree "${jenkins_pid}" \
-        | egrep -i 'bash|integration|e2e|minikube' \
+        | grep -E -i 'bash|integration|e2e|minikube' \
         && echo "tests are is running on pid ${jenkins_pid} ..." \
         && exit 1
 }
+
+brew upgrade
+gcloud components update -q
 
 check_jenkins
 logger "cleanup_and_reboot running - may shutdown in 60 seconds"
@@ -42,7 +48,7 @@ logger "cleanup_and_reboot is happening!"
 killall java
 
 # clean docker left overs
-docker rm -f -v $(docker ps -aq) >/dev/null 2>&1 || true
+docker rm -f -v "$(docker ps -aq)" >/dev/null 2>&1 || true
 docker volume prune -f || true
 docker volume ls || true
 docker system df || true

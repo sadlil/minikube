@@ -23,9 +23,9 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/docker/machine/libmachine"
 	typed_core "k8s.io/client-go/kubernetes/typed/core/v1"
 	"k8s.io/klog/v2"
+	"k8s.io/minikube/pkg/libmachine"
 	"k8s.io/minikube/pkg/minikube/config"
 	"k8s.io/minikube/pkg/minikube/localpath"
 )
@@ -79,7 +79,7 @@ func (mgr *Manager) startTunnel(ctx context.Context, tunnel controller) (done ch
 	go mgr.run(ctx, tunnel, ready, check, done)
 
 	klog.Info("Started minikube tunnel.")
-	return
+	return done, err
 }
 
 func (mgr *Manager) timerLoop(ready, check chan bool) {

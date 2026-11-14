@@ -23,38 +23,57 @@ import (
 	"time"
 
 	v1 "k8s.io/api/core/v1"
+	v1_networking "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	typed_core "k8s.io/client-go/kubernetes/typed/core/v1"
+	typed_networking "k8s.io/client-go/kubernetes/typed/networking/v1"
 
 	"k8s.io/klog/v2"
 	"k8s.io/minikube/pkg/minikube/tunnel"
 )
 
-// SSHTunnel ...
+// SSHTunnel manages and reconciles SSH tunnels for Kubernetes Services
+// (specifically type LoadBalancer) and Ingress resources. It periodically
+// checks the cluster state and creates, maintains, or removes tunnels as needed.
 type SSHTunnel struct {
 	ctx                  context.Context
 	sshPort              string
 	sshKey               string
+	bindAddress          string
 	v1Core               typed_core.CoreV1Interface
+	v1Networking         typed_networking.NetworkingV1Interface
 	LoadBalancerEmulator tunnel.LoadBalancerEmulator
 	conns                map[string]*sshConn
 	connsToStop          map[string]*sshConn
 }
 
-// NewSSHTunnel ...
-func NewSSHTunnel(ctx context.Context, sshPort, sshKey string, v1Core typed_core.CoreV1Interface) *SSHTunnel {
+// NewSSHTunnel creates and returns a new SSHTunnel instance.
+// ctx is the context that controls the lifecycle of the tunnel manager.
+// sshPort is the port number of the SSH server to connect to.
+// sshKey is the path to the SSH private key file for authentication.
+// bindAddress is the local address on which the tunnels will listen.
+// v1Core is a Kubernetes CoreV1 client interface for interacting with Services.
+// v1Networking is a Kubernetes NetworkingV1 client interface for interacting with Ingresses.
+func NewSSHTunnel(ctx context.Context, sshPort, sshKey, bindAddress string, v1Core typed_core.CoreV1Interface, v1Networking typed_networking.NetworkingV1Interface) *SSHTunnel {
 	return &SSHTunnel{
 		ctx:                  ctx,
 		sshPort:              sshPort,
 		sshKey:               sshKey,
+		bindAddress:          bindAddress,
 		v1Core:               v1Core,
 		LoadBalancerEmulator: tunnel.NewLoadBalancerEmulator(v1Core),
+		v1Networking:         v1Networking,
 		conns:                make(map[string]*sshConn),
 		connsToStop:          make(map[string]*sshConn),
 	}
 }
 
-// Start ...
+// Start begins the main reconciliation loop for the SSHTunnel.
+// This loop periodically scans for Kubernetes Services (type LoadBalancer)
+// and Ingresses, creating or tearing down SSH tunnels as necessary.
+// This method blocks until the provided context (t.ctx) is canceled.
+// It returns any error associated with context cancellation or initial setup.
+// Runtime errors during the tunnel management loop are logged via klog.
 func (t *SSHTunnel) Start() error {
 	for {
 		select {
@@ -63,6 +82,7 @@ func (t *SSHTunnel) Start() error {
 			if err != nil {
 				klog.Errorf("error cleaning up: %v", err)
 			}
+			t.stopActiveConnections()
 			return err
 		default:
 		}
@@ -72,12 +92,21 @@ func (t *SSHTunnel) Start() error {
 			klog.Errorf("error listing services: %v", err)
 		}
 
+		ingresses, err := t.v1Networking.Ingresses("").List(context.Background(), metav1.ListOptions{})
+		if err != nil {
+			klog.Errorf("error listing ingresses: %v", err)
+		}
+
 		t.markConnectionsToBeStopped()
 
 		for _, svc := range services.Items {
 			if svc.Spec.Type == v1.ServiceTypeLoadBalancer {
 				t.startConnection(svc)
 			}
+		}
+
+		for _, ingress := range ingresses.Items {
+			t.startConnectionIngress(ingress)
 		}
 
 		t.stopMarkedConnections()
@@ -103,8 +132,14 @@ func (t *SSHTunnel) startConnection(svc v1.Service) {
 		return
 	}
 
+	resourcePorts := []int32{}
+
+	for _, port := range svc.Spec.Ports {
+		resourcePorts = append(resourcePorts, port.Port)
+	}
+
 	// create new ssh conn
-	newSSHConn := createSSHConn(uniqName, t.sshPort, t.sshKey, &svc)
+	newSSHConn := createSSHConn(uniqName, t.sshPort, t.sshKey, t.bindAddress, resourcePorts, svc.Spec.ClusterIP, svc.Name)
 	t.conns[newSSHConn.name] = newSSHConn
 
 	go func() {
@@ -120,6 +155,40 @@ func (t *SSHTunnel) startConnection(svc v1.Service) {
 	}
 }
 
+func (t *SSHTunnel) startConnectionIngress(ingress v1_networking.Ingress) {
+	uniqName := sshConnUniqNameIngress(ingress)
+	existingSSHConn, ok := t.conns[uniqName]
+
+	if ok {
+		// if the svc still exist we remove the conn from the stopping list
+		delete(t.connsToStop, existingSSHConn.name)
+		return
+	}
+
+	resourcePorts := []int32{80, 443}
+	resourceIP := "127.0.0.1"
+
+	// create new ssh conn
+	newSSHConn := createSSHConn(uniqName, t.sshPort, t.sshKey, t.bindAddress, resourcePorts, resourceIP, ingress.Name)
+	t.conns[newSSHConn.name] = newSSHConn
+
+	go func() {
+		err := newSSHConn.startAndWait()
+		if err != nil {
+			klog.Errorf("error starting ssh tunnel: %v", err)
+		}
+	}()
+}
+
+func (t *SSHTunnel) stopActiveConnections() {
+	for _, conn := range t.conns {
+		err := conn.stop()
+		if err != nil {
+			klog.Errorf("error stopping ssh tunnel: %v", err)
+		}
+	}
+}
+
 func (t *SSHTunnel) stopMarkedConnections() {
 	for _, sshConn := range t.connsToStop {
 		err := sshConn.stop()
@@ -131,7 +200,7 @@ func (t *SSHTunnel) stopMarkedConnections() {
 	}
 }
 
-// sshConnName creates a uniq name for the tunnel, using its name/clusterIP/ports.
+// sshConnUniqName creates a uniq name for the tunnel, using its name/clusterIP/ports.
 // This allows a new process to be created if an existing service was changed,
 // the new process will support the IP/Ports change occurred.
 func sshConnUniqName(service v1.Service) string {
@@ -143,6 +212,16 @@ func sshConnUniqName(service v1.Service) string {
 
 	for _, port := range service.Spec.Ports {
 		n = append(n, fmt.Sprintf("-%d", port.Port))
+	}
+
+	return strings.Join(n, "")
+}
+
+func sshConnUniqNameIngress(ingress v1_networking.Ingress) string {
+	n := []string{ingress.Name}
+
+	for _, rule := range ingress.Spec.Rules {
+		n = append(n, rule.Host)
 	}
 
 	return strings.Join(n, "")

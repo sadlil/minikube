@@ -22,7 +22,7 @@ aliases:
 
 The `minikube start` command supports 5 additional KVM specific flags:
 
-* **`--gpu`**: Enable experimental NVIDIA GPU support in minikube
+* **`--kvm-gpu`**: Enable experimental NVIDIA GPU support in minikube
 * **`--hidden`**: Hide the hypervisor signature from the guest in minikube
 * **`--kvm-network`**:  The KVM default network name
 * **`--network`**:  The dedicated KVM private network name
@@ -36,9 +36,9 @@ The `minikube start` command supports 5 additional KVM specific flags:
 * KVM VM's cannot be used simultaneously with VirtualBox  [#4913](https://github.com/kubernetes/minikube/issues/4913)
 * On some distributions, libvirt bridge networking may fail until the host reboots
 
-Also see [co/kvm2 open issues](https://github.com/kubernetes/minikube/labels/co%2Fkvm2)
+Also see [co/kvm2-driver open issues](https://github.com/kubernetes/minikube/labels/co%2Fkvm2-driver).
 
-### Nested Virtulization
+### Nested Virtualization
 
 If you are running KVM in a nested virtualization environment ensure your config the kernel modules correctly follow either [this](https://stafwag.github.io/blog/blog/2018/06/04/nested-virtualization-in-kvm/) or [this](https://computingforgeeks.com/how-to-install-kvm-virtualization-on-debian/) tutorial.
 
@@ -49,7 +49,6 @@ If you are running KVM in a nested virtualization environment ensure your config
 * Run `virt-host-validate` and check for the suggestions.
 * Run ``ls -la `which virsh` ``, `virsh uri`, `sudo virsh net-list --all` and `ip a s` to collect additional information for debugging.
 * Run `minikube start --alsologtostderr -v=9` to debug crashes.
-* Run `docker-machine-driver-kvm2 version` to verify the kvm2 driver executes properly.
 * Read [How to debug Virtualization problems](https://fedoraproject.org/wiki/How_to_debug_Virtualization_problems)
 
 ### Troubleshooting KVM/libvirt networks

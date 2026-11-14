@@ -59,13 +59,13 @@ func (router *osRouter) Inspect(route *Route) (exists bool, conflict string, ove
 	stdInAndOut, err := cmd.CombinedOutput()
 	if err != nil {
 		err = fmt.Errorf("error running '%v': %s", cmd, err)
-		return
+		return false, "", nil, err
 	}
 	rt := router.parseTable(stdInAndOut)
 
 	exists, conflict, overlaps = rt.Check(route)
 
-	return
+	return exists, conflict, overlaps, nil
 }
 
 func (router *osRouter) parseTable(table []byte) routingTable {
@@ -94,12 +94,12 @@ func (router *osRouter) parseTable(table []byte) routingTable {
 			}
 
 			_, ipNet, err := net.ParseCIDR(dstCIDRString)
-			if err != nil {
+			switch {
+			case err != nil:
 				klog.V(4).Infof("skipping line: can't parse CIDR from routing table: %s", dstCIDRString)
-			} else if gatewayIP == nil {
+			case gatewayIP == nil:
 				klog.V(4).Infof("skipping line: can't parse IP from routing table: %s", gatewayIPString)
-			} else {
-
+			default:
 				tableLine := routingTableLine{
 					route: &Route{
 						DestCIDR: ipNet,
@@ -129,7 +129,7 @@ func (router *osRouter) Cleanup(route *Route) error {
 	klog.Infof("Cleaning up route for CIDR %s to gateway %s\n", serviceCIDR, gatewayIP)
 	command := exec.Command("sudo", "ip", "route", "delete", serviceCIDR)
 	stdInAndOut, err := command.CombinedOutput()
-	message := fmt.Sprintf("%s", stdInAndOut)
+	message := string(stdInAndOut)
 	klog.Infof("%s", message)
 	if err != nil {
 		return fmt.Errorf("error deleting Route: %s, %s", message, err)

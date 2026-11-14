@@ -21,8 +21,7 @@
 # MINIKUBE_LOCATION: GIT_COMMIT from upstream build.
 # COMMIT: Actual commit ID from upstream build
 # EXTRA_BUILD_ARGS (optional): Extra args to be passed into the minikube integrations tests
-# access_token: The Github API access token. Injected by the Jenkins credential provider. 
-
+# access_token: The GitHub API access token. Injected by the Jenkins credential provider.
 
 set -e
 
@@ -31,13 +30,17 @@ ARCH="amd64"
 DRIVER="none"
 JOB_NAME="none_Linux"
 EXTRA_START_ARGS="--bootstrapper=kubeadm"
-EXPECTED_DEFAULT_DRIVER="kvm2"
 
-SUDO_PREFIX="sudo -E "
-export KUBECONFIG="/root/.kube/config"
+# add install location of iptables and conntrack to PATH
+PATH="/usr/sbin:$PATH"
 
+if ! kubeadm &>/dev/null; then
+  echo "WARNING: kubeadm is not installed. will try to install."
+  curl -LO "https://dl.k8s.io/release/$(curl -sSL https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubeadm"
+  sudo install kubeadm /usr/local/bin/kubeadm
+fi
 # "none" driver specific cleanup from previous runs.
-sudo kubeadm reset -f || true
+sudo kubeadm reset -f --cri-socket unix:///var/run/cri-dockerd.sock || true
 # kubeadm reset may not stop pods immediately
 docker rm -f $(docker ps -aq) >/dev/null 2>&1 || true
 
@@ -52,22 +55,48 @@ sudo systemctl is-active --quiet kubelet \
   && echo "stopping kubelet" \
   && sudo systemctl stop -f kubelet
 
- # conntrack is required for kubernetes 1.18 and higher for none driver
+# conntrack is required for Kubernetes 1.18 and higher for none driver
 if ! conntrack --version &>/dev/null; then
-  echo "WARNING: contrack is not installed. will try to install."
+  echo "WARNING: conntrack is not installed. will try to install."
   sudo apt-get update -qq
   sudo apt-get -qq -y install conntrack
 fi
 
- # socat is required for kubectl port forward which is used in some tests such as validateHelmTillerAddon
+# socat is required for kubectl port forward which is used in some tests such as validateHelmTillerAddon
 if ! which socat &>/dev/null; then
   echo "WARNING: socat is not installed. will try to install."
   sudo apt-get update -qq
   sudo apt-get -qq -y install socat
 fi
 
-mkdir -p cron && gsutil -m rsync "gs://minikube-builds/${MINIKUBE_LOCATION}/cron" cron || echo "FAILED TO GET CRON FILES"
-sudo install cron/cleanup_and_reboot_Linux.sh /etc/cron.hourly/cleanup_and_reboot || echo "FAILED TO INSTALL CLEANUP"
+# cri-dockerd is required for Kubernetes v1.24+ with none driver
+CRI_DOCKERD_VERSION="0.4.10"
+if [[ $(cri-dockerd --version 2>&1) != *"$CRI_DOCKERD_VERSION"* ]]; then
+  echo "WARNING: expected version of cri-dockerd is not installed. will try to install."
+  sudo systemctl stop cri-docker.socket || true
+  sudo systemctl stop cri-docker.service || true
+  curl -L "https://github.com/Mirantis/cri-dockerd/releases/download/v${CRI_DOCKERD_VERSION}/cri-dockerd-${CRI_DOCKERD_VERSION}.amd64.tgz" -o /tmp/cri-dockerd.tgz
+  tar -C /tmp -xzvf /tmp/cri-dockerd.tgz
+  sudo mv /tmp/cri-dockerd/cri-dockerd /usr/bin/cri-dockerd
+  sudo chmod +x /usr/bin/cri-dockerd
+  sudo curl -L "https://raw.githubusercontent.com/Mirantis/cri-dockerd/v${CRI_DOCKERD_VERSION}/packaging/systemd/cri-docker.socket" -o /usr/lib/systemd/system/cri-docker.socket
+  sudo curl -L "https://raw.githubusercontent.com/Mirantis/cri-dockerd/v${CRI_DOCKERD_VERSION}/packaging/systemd/cri-docker.service" -o /usr/lib/systemd/system/cri-docker.service
+
+  sudo systemctl daemon-reload
+  sudo systemctl enable cri-docker.service
+  sudo systemctl enable --now cri-docker.socket
+fi
+
+# crictl is required for Kubernetes v1.24+ with none driver
+CRICTL_VERSION="v1.35.0"
+if [[ $(crictl --version) != *"$CRICTL_VERSION"* ]]; then
+  echo "WARNING: expected version of crictl is not installed. will try to install."
+  curl -L https://github.com/kubernetes-sigs/cri-tools/releases/download/$CRICTL_VERSION/crictl-${CRICTL_VERSION}-linux-amd64.tar.gz --output crictl-${CRICTL_VERSION}-linux-amd64.tar.gz
+  sudo tar zxvf crictl-$CRICTL_VERSION-linux-amd64.tar.gz -C /usr/local/bin
+fi
+
+# cni-plugins is required for Kubernetes v1.24+ with none driver
+./installers/check_install_cni_plugins.sh
 
 # We need this for reasons now
 sudo sysctl fs.protected_regular=0

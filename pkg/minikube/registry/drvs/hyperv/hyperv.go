@@ -1,4 +1,4 @@
-// +build windows
+//go:build windows
 
 /*
 Copyright 2018 The Kubernetes Authors All rights reserved.
@@ -20,20 +20,21 @@ package hyperv
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os/exec"
 	"strings"
 	"time"
 
-	"github.com/docker/machine/drivers/hyperv"
-	"github.com/docker/machine/libmachine/drivers"
-	"github.com/pkg/errors"
+	"k8s.io/minikube/pkg/libmachine/drivers"
 
+	"k8s.io/minikube/pkg/drivers/hyperv"
 	"k8s.io/minikube/pkg/minikube/config"
 	"k8s.io/minikube/pkg/minikube/download"
 	"k8s.io/minikube/pkg/minikube/driver"
 	"k8s.io/minikube/pkg/minikube/localpath"
 	"k8s.io/minikube/pkg/minikube/registry"
+	"k8s.io/minikube/pkg/minikube/run"
 )
 
 const (
@@ -43,12 +44,13 @@ const (
 
 func init() {
 	if err := registry.Register(registry.DriverDef{
-		Name:     driver.HyperV,
-		Init:     func() drivers.Driver { return hyperv.NewDriver("", "") },
-		Config:   configure,
-		Status:   status,
-		Default:  true,
-		Priority: registry.Preferred,
+		Name:         driver.HyperV,
+		Init:         func(_ *run.CommandOptions) drivers.Driver { return hyperv.NewDriver("", "") },
+		Config:       configure,
+		Status:       status,
+		Default:      true,
+		Priority:     registry.Preferred,
+		ProbeTimeout: 8 * time.Second,
 	}); err != nil {
 		panic(fmt.Sprintf("register: %v", err))
 	}
@@ -61,7 +63,7 @@ func configure(cfg config.ClusterConfig, n config.Node) (interface{}, error) {
 	if d.VSwitch == "" && cfg.HypervUseExternalSwitch {
 		switchName, adapter, err := chooseSwitch(cfg.HypervExternalAdapter)
 		if err != nil {
-			return nil, errors.Wrapf(err, "failed to choose switch for Hyper-V driver")
+			return nil, fmt.Errorf("failed to choose switch for Hyper-V driver: %w", err)
 		}
 		if cfg.HypervExternalAdapter == "" && switchName == "" {
 			// create a switch on the returned adapter
@@ -81,22 +83,29 @@ func configure(cfg config.ClusterConfig, n config.Node) (interface{}, error) {
 	return d, nil
 }
 
-func status() registry.State {
+func status(_ *run.CommandOptions) registry.State {
 	path, err := exec.LookPath("powershell")
 	if err != nil {
 		return registry.State{Error: err}
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	timeout := registry.Driver(driver.HyperV).ProbeTimeout
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, path, "-NoProfile", "-NonInteractive", "@(Get-Wmiobject Win32_ComputerSystem).HypervisorPresent")
+	cmd := exec.CommandContext(ctx, path, "-NoProfile", "-NonInteractive", "@(Get-CimInstance Win32_ComputerSystem).HypervisorPresent")
 	out, err := cmd.CombinedOutput()
 
 	if err != nil {
-		errorMessage := fmt.Errorf("%s failed:\n%s", strings.Join(cmd.Args, " "), out)
-		fixMessage := "Start PowerShell as an Administrator"
-		return registry.State{Installed: false, Running: true, Error: errorMessage, Fix: fixMessage, Doc: docURL}
+		cimError := fmt.Errorf("%s failed:\n%s ", strings.Join(cmd.Args, " "), out)
+		cmd := exec.CommandContext(ctx, path, "-NoProfile", "-NonInteractive", "@(Get-Wmiobject Win32_ComputerSystem).HypervisorPresent")
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			wmiError := fmt.Errorf("%s failed:\n%s ", strings.Join(cmd.Args, " "), out)
+			errorMessage := fmt.Errorf("%s\n%s", cimError, wmiError)
+			fixMessage := "Start PowerShell as an Administrator"
+			return registry.State{Installed: false, Running: true, Error: errorMessage, Fix: fixMessage, Doc: docURL}
+		}
 	}
 
 	// Get-Wmiobject does not return an error code for false
@@ -126,7 +135,7 @@ func status() registry.State {
 	}
 
 	if (strings.TrimSpace(string(adminCheckOut)) != "True") && (strings.TrimSpace(string(hypervAdminCheckOut)) != "True") {
-		err := fmt.Errorf("Hyper-V requires Administrator privileges")
+		err := errors.New("Hyper-V requires Administrator privileges")
 		fixMessage := "Right-click the PowerShell icon and select Run as Administrator to open PowerShell in elevated mode."
 		return registry.State{Installed: true, Running: false, Error: err, Fix: fixMessage}
 	}

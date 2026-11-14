@@ -1,4 +1,4 @@
-// +build integration
+//go:build integration
 
 /*
 Copyright 2020 The Kubernetes Authors All rights reserved.
@@ -21,7 +21,6 @@ package integration
 import (
 	"context"
 	"fmt"
-	"io/ioutil"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -36,12 +35,16 @@ import (
 
 // TestSkaffold makes sure skaffold run can be run with minikube
 func TestSkaffold(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skipping due to https://github.com/kubernetes/minikube/issues/14232")
+	}
 	if NoneDriver() {
 		t.Skip("none driver doesn't support `minikube docker-env`; skaffold depends on this command")
 	}
 	if cr := ContainerRuntime(); cr != "docker" {
 		t.Skipf("skaffold requires docker-env, currently testing %s container runtime", cr)
 	}
+	MaybeSkipDockerRuntime(t)
 
 	profile := UniqueProfileName("skaffold")
 	ctx, cancel := context.WithTimeout(context.Background(), Minutes(5))
@@ -60,7 +63,7 @@ func TestSkaffold(t *testing.T) {
 	}
 	t.Logf("skaffold version: %s", rr.Stdout.Bytes())
 
-	args := append([]string{"start", "-p", profile, "--memory=2600"}, StartArgs()...)
+	args := append([]string{"start", "-p", profile, "--memory=3072"}, StartArgs()...)
 	rr, err = Run(t, exec.CommandContext(ctx, Target(), args...))
 	if err != nil {
 		t.Fatalf("starting minikube: %v\n%s", err, rr.Output())
@@ -80,15 +83,14 @@ func TestSkaffold(t *testing.T) {
 	}
 
 	if filepath.Base(Target()) != binaryName {
-		new := filepath.Join(filepath.Dir(abs), binaryName)
-		t.Logf("copying %s to %s", Target(), new)
-		if err := copy.Copy(Target(), new); err != nil {
+		dst := filepath.Join(filepath.Dir(abs), binaryName)
+		t.Logf("copying %s to %s", Target(), dst)
+		if err := copy.Copy(Target(), dst); err != nil {
 			t.Fatalf("error copying to minikube")
 		}
 	}
 
-	oldPath := os.Getenv("PATH")
-	os.Setenv("PATH", fmt.Sprintf("%s%s%s", filepath.Dir(abs), pathSeparator, os.Getenv("PATH")))
+	t.Setenv("PATH", fmt.Sprintf("%s%s%s", filepath.Dir(abs), pathSeparator, os.Getenv("PATH")))
 
 	// make sure 'docker' and 'minikube' are now in PATH
 	for _, binary := range []string{"minikube", "docker"} {
@@ -97,10 +99,6 @@ func TestSkaffold(t *testing.T) {
 			t.Fatalf("%q is not in path", binary)
 		}
 	}
-
-	defer func() {
-		os.Setenv("PATH", oldPath)
-	}()
 
 	// make sure "skaffold run" exits without failure
 	cmd := exec.CommandContext(ctx, tf.Name(), "run", "--minikube-profile", profile, "--kube-context", profile, "--status-check=true", "--port-forward=false", "--interactive=false")
@@ -121,7 +119,7 @@ func TestSkaffold(t *testing.T) {
 
 // installSkaffold installs the latest release of skaffold
 func installSkaffold() (f *os.File, err error) {
-	tf, err := ioutil.TempFile("", "skaffold.exe")
+	tf, err := os.CreateTemp("", "skaffold.exe")
 	if err != nil {
 		return tf, err
 	}

@@ -18,15 +18,12 @@ package tunnel
 
 import (
 	"fmt"
-	"io/ioutil"
 	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
-
-	"github.com/pkg/errors"
 
 	"k8s.io/klog/v2"
 )
@@ -50,7 +47,7 @@ func (router *osRouter) EnsureRouteIsAdded(route *Route) error {
 	command := exec.Command("sudo", "route", "-n", "add", serviceCIDR, gatewayIP)
 	klog.Infof("About to run command: %s", command.Args)
 	stdInAndOut, err := command.CombinedOutput()
-	message := fmt.Sprintf("%s", stdInAndOut)
+	message := string(stdInAndOut)
 	re := regexp.MustCompile(fmt.Sprintf("add net (.*): gateway %s\n", gatewayIP))
 	if !re.MatchString(message) {
 		return fmt.Errorf("error adding Route: %s, %d", message, len(strings.Split(message, "\n")))
@@ -79,7 +76,7 @@ func (router *osRouter) Inspect(route *Route) (exists bool, conflict string, ove
 func (router *osRouter) parseTable(table []byte) routingTable {
 	t := routingTable{}
 	skip := true
-	for _, line := range strings.Split(string(table), "\n") {
+	for line := range strings.SplitSeq(string(table), "\n") {
 		// header
 		if strings.HasPrefix(line, "Destination") {
 			skip = false
@@ -164,7 +161,7 @@ func (router *osRouter) Cleanup(route *Route) error {
 	if err != nil {
 		return err
 	}
-	msg := fmt.Sprintf("%s", stdInAndOut)
+	msg := string(stdInAndOut)
 	klog.V(4).Infof("%s", msg)
 	re := regexp.MustCompile("^delete net ([^:]*)$")
 	if !re.MatchString(msg) {
@@ -187,22 +184,22 @@ func writeResolverFile(route *Route) error {
 	klog.Infof("preparing DNS forwarding config in %q:\n%s", resolverFile, content)
 
 	// write resolver content into tf, then copy it to /etc/resolver/clusterDomain
-	tf, err := ioutil.TempFile("", "minikube-tunnel-resolver-")
+	tf, err := os.CreateTemp("", "minikube-tunnel-resolver-")
 	if err != nil {
-		return errors.Wrap(err, "tempfile")
+		return fmt.Errorf("tempfile: %w", err)
 	}
 	defer os.Remove(tf.Name())
 
 	if _, err = tf.WriteString(content); err != nil {
-		return errors.Wrap(err, "write")
+		return fmt.Errorf("write: %w", err)
 	}
 
 	if err = tf.Close(); err != nil {
-		return errors.Wrap(err, "close")
+		return fmt.Errorf("close: %w", err)
 	}
 
 	if err = os.Chmod(tf.Name(), 0644); err != nil {
-		return errors.Wrap(err, "chmod")
+		return fmt.Errorf("chmod: %w", err)
 	}
 
 	cmd := exec.Command("sudo", "mkdir", "-p", filepath.Dir(resolverFile))
@@ -211,7 +208,7 @@ func writeResolverFile(route *Route) error {
 		if exitErr, ok := err.(*exec.ExitError); ok {
 			return fmt.Errorf("%q failed: %v: %q", strings.Join(cmd.Args, " "), exitErr, exitErr.Stderr)
 		}
-		return errors.Wrap(err, "mkdir")
+		return fmt.Errorf("mkdir: %w", err)
 	}
 
 	cmd = exec.Command("sudo", "cp", "-fp", tf.Name(), resolverFile)
@@ -221,7 +218,7 @@ func writeResolverFile(route *Route) error {
 		if exitErr, ok := err.(*exec.ExitError); ok {
 			return fmt.Errorf("%q failed: %v: %q", strings.Join(cmd.Args, " "), exitErr, exitErr.Stderr)
 		}
-		return errors.Wrap(err, "copy")
+		return fmt.Errorf("copy: %w", err)
 	}
 	klog.Infof("DNS forwarding now configured in %q", resolverFile)
 	return nil

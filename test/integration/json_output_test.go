@@ -43,7 +43,7 @@ func TestJSONOutput(t *testing.T) {
 	}{
 		{
 			command: "start",
-			args:    append([]string{"--memory=2200", "--wait=true"}, StartArgs()...),
+			args:    append([]string{"--memory=3072", "--wait=true"}, StartArgs()...),
 		}, {
 			command: "pause",
 		}, {
@@ -55,18 +55,21 @@ func TestJSONOutput(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.command, func(t *testing.T) {
-			args := []string{test.command, "-p", profile, "--output=json", "--user=testUser"}
-			args = append(args, test.args...)
+			var ces []*cloudEvent
+			t.Run("Command", func(t *testing.T) {
+				args := []string{test.command, "-p", profile, "--output=json", "--user=testUser"}
+				args = append(args, test.args...)
 
-			rr, err := Run(t, exec.CommandContext(ctx, Target(), args...))
-			if err != nil {
-				t.Errorf("failed to clean up: args %q: %v", rr.Command(), err)
-			}
+				rr, err := Run(t, exec.CommandContext(ctx, Target(), args...))
+				if err != nil {
+					t.Errorf("failed to clean up: args %q: %v", rr.Command(), err)
+				}
 
-			ces, err := cloudEvents(t, rr)
-			if err != nil {
-				t.Fatalf("converting to cloud events: %v\n", err)
-			}
+				ces, err = cloudEvents(t, rr)
+				if err != nil {
+					t.Fatalf("converting to cloud events: %v\n", err)
+				}
+			})
 
 			t.Run("Audit", func(t *testing.T) {
 				got, err := auditContains("testUser")
@@ -88,7 +91,6 @@ func TestJSONOutput(t *testing.T) {
 					{"IncreasingCurrentSteps", validateIncreasingCurrentSteps},
 				}
 				for _, stc := range parallelTests {
-					stc := stc
 					t.Run(stc.name, func(t *testing.T) {
 						MaybeParallel(t)
 						stc.validator(ctx, t, ces)
@@ -99,8 +101,8 @@ func TestJSONOutput(t *testing.T) {
 	}
 }
 
-//  validateDistinctCurrentSteps makes sure each step has a distinct step number
-func validateDistinctCurrentSteps(ctx context.Context, t *testing.T, ces []*cloudEvent) {
+// validateDistinctCurrentSteps makes sure each step has a distinct step number
+func validateDistinctCurrentSteps(_ context.Context, t *testing.T, ces []*cloudEvent) {
 	steps := map[string]string{}
 	for _, ce := range ces {
 		currentStep, exists := ce.data["currentstep"]
@@ -115,9 +117,9 @@ func validateDistinctCurrentSteps(ctx context.Context, t *testing.T, ces []*clou
 }
 
 // validateIncreasingCurrentSteps verifies that for a successful minikube start, 'current step' should be increasing
-func validateIncreasingCurrentSteps(ctx context.Context, t *testing.T, ces []*cloudEvent) {
+func validateIncreasingCurrentSteps(_ context.Context, t *testing.T, ces []*cloudEvent) {
 	step := -1
-	for _, ce := range ces {
+	for i, ce := range ces {
 		currentStep, exists := ce.data["currentstep"]
 		if !exists || ce.Type() != "io.k8s.sigs.minikube.step" {
 			continue
@@ -127,6 +129,17 @@ func validateIncreasingCurrentSteps(ctx context.Context, t *testing.T, ces []*cl
 			t.Fatalf("current step is not an integer: %v\n%v", currentStep, ce)
 		}
 		if cs <= step {
+			// check if steps are mixed because of goroutines complete in unusual order, but still ok
+			// eg, "Enabling Addons" (goroutine) might complete before or after "Verifying Kubernetes" finishes
+			if i > 0 {
+				prev := ces[i-1].data["name"]
+				cur := ce.data["name"]
+				if cur == "Verifying Kubernetes" && prev == "Enabling Addons" {
+					t.Logf("unusual order of steps, might be ok: %q event came before %q", prev, cur)
+					step = cs
+					continue
+				}
+			}
 			t.Fatalf("current step is not in increasing order: %v", ces)
 		}
 		step = cs
@@ -141,7 +154,7 @@ func TestErrorJSONOutput(t *testing.T) {
 
 	// force a failure via --driver=fail so that we can make sure errors
 	// are printed as expected
-	startArgs := []string{"start", "-p", profile, "--memory=2200", "--output=json", "--wait=true", "--driver=fail"}
+	startArgs := []string{"start", "-p", profile, "--memory=3072", "--output=json", "--wait=true", "--driver=fail"}
 
 	rr, err := Run(t, exec.CommandContext(ctx, Target(), startArgs...))
 	if err == nil {

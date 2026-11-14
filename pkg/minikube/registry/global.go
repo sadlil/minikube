@@ -17,11 +17,15 @@ limitations under the License.
 package registry
 
 import (
+	"cmp"
 	"fmt"
 	"os"
-	"sort"
+	"slices"
+	"sync"
+	"time"
 
 	"k8s.io/klog/v2"
+	"k8s.io/minikube/pkg/minikube/run"
 	"k8s.io/minikube/pkg/minikube/translate"
 )
 
@@ -105,46 +109,66 @@ func Driver(name string) DriverDef {
 	return globalRegistry.Driver(name)
 }
 
-// Available returns a list of available drivers in the global registry
-func Available(vm bool) []DriverState {
-	sts := []DriverState{}
+// Available returns a list of available drivers in the global registry.
+// Drivers are probed in parallel (one goroutine each), so wall-clock time is
+// about the slowest Status check, not the sum of all checks. Each driver's
+// status is responsible for respecting DriverDef.ProbeTimeout.
+func Available(vm bool, options *run.CommandOptions) []DriverState {
 	klog.Infof("Querying for installed drivers using PATH=%s", os.Getenv("PATH"))
 
-	for _, d := range globalRegistry.List() {
+	type probeResult struct {
+		driver DriverDef
+		state  State
+	}
+
+	drivers := globalRegistry.List()
+	results := make(chan probeResult, len(drivers))
+	var wg sync.WaitGroup
+
+	for _, d := range drivers {
+		if vm && !IsVM(d.Name) {
+			continue
+		}
 		if d.Status == nil {
 			klog.Errorf("%q does not implement Status", d.Name)
 			continue
 		}
-		s := d.Status()
-		klog.Infof("%s default: %v priority: %d, state: %+v", d.Name, d.Default, d.Priority, s)
+		wg.Go(func() {
+			start := time.Now()
+			s := d.Status(options)
+			klog.Infof("%s probed in %v: default: %v priority: %d, state: %+v", d.Name, time.Since(start), d.Default, d.Priority, s)
+			results <- probeResult{driver: d, state: s}
+		})
+	}
+
+	wg.Wait()
+	close(results)
+
+	sts := make([]DriverState, 0, len(drivers))
+	for r := range results {
+		s := r.state
+		d := r.driver
 
 		preference := d.Priority
 		priority := d.Priority
 		if !s.Healthy {
 			priority = Unhealthy
 		}
-
-		if vm {
-			if IsVM(d.Name) {
-				sts = append(sts, DriverState{Name: d.Name, Default: d.Default, Preference: preference, Priority: priority, State: s})
-			}
-		} else {
-			sts = append(sts, DriverState{Name: d.Name, Default: d.Default, Preference: preference, Priority: priority, State: s})
-		}
+		sts = append(sts, DriverState{Name: d.Name, Default: d.Default, Preference: preference, Priority: priority, State: s})
 	}
 
 	// Descending priority for predictability
-	sort.Slice(sts, func(i, j int) bool {
-		return sts[i].Priority > sts[j].Priority
+	slices.SortFunc(sts, func(a, b DriverState) int {
+		return cmp.Compare(b.Priority, a.Priority)
 	})
 	return sts
 }
 
 // Status returns the state of a driver within the global registry
-func Status(name string) State {
+func Status(name string, options *run.CommandOptions) State {
 	d := globalRegistry.Driver(name)
 	if d.Empty() {
 		return State{}
 	}
-	return d.Status()
+	return d.Status(options)
 }

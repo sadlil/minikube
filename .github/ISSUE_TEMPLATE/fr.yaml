@@ -1,0 +1,53 @@
+name: Français
+description: Signaler un problème
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Que s’est-il passé ?
+      description: |
+        Astuce : ajoutez le paramètre "--alsologtostderr" à la ligne de commande pour obtenir davantage de journaux.
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Joindre le fichier de journal
+      description: |
+        Astuce : exécutez `minikube logs --file=log.txt`, puis faites glisser et déposez le fichier `log.txt` dans le navigateur.
+    validations:
+      required: true
+  - type: dropdown
+    id: operating-system
+    attributes:
+      label: Système d’exploitation
+      description: Quel est votre système d’exploitation ?
+      options:
+        - macOS (Default)
+        - Windows
+        - Ubuntu
+        - Redhat/Fedora
+        - Other
+    validations:
+      required: false
+  - type: dropdown
+    id: driver
+    attributes:
+      label: Pilote
+      description: Quel pilote utilisez-vous ?
+      options:
+        - N/A
+        - Docker
+        - Podman
+        - Hyper-V
+        - KVM2
+        - VirtualBox
+        - None (Baremetal)
+        - SSH
+        - VMware
+        - Parallels
+        - QEMU
+        - vfkit
+        - krunkit
+    validations:
+      required: false

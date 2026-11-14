@@ -20,25 +20,31 @@
 # MINIKUBE_LOCATION: GIT_COMMIT from upstream build.
 # COMMIT: Actual commit ID from upstream build
 # EXTRA_BUILD_ARGS (optional): Extra args to be passed into the minikube integrations tests
-# access_token: The Github API access token. Injected by the Jenkins credential provider.
+# access_token: The GitHub API access token. Injected by the Jenkins credential provider.
 
-set -ex
+set -x
 
 gcloud cloud-shell ssh --authorize-session << EOF
+ sudo rm -rf .cache .kube out testdata go
  OS="linux"
  ARCH="amd64"
  DRIVER="docker"
  JOB_NAME="Docker_Cloud_Shell"
  CONTAINER_RUNTIME="docker"
- EXTRA_TEST_ARGS="-test.run (TestFunctional|TestAddons)"
+ EXTRA_TEST_ARGS="-test.run (TestFunctional|TestAddons|TestStartStop)"
 
  # Need to set these in cloud-shell or will not be present in common.sh
- MINIKUBE_LOCATION=$MINIKUBE_LOCATION
- COMMIT=$COMMIT
- EXTRA_BUILD_ARGS=$EXTRA_BUILD_ARGS
- access_token=$access_token
+ MINIKUBE_LOCATION="$MINIKUBE_LOCATION"
+ COMMIT="$COMMIT"
+ EXTRA_BUILD_ARGS="$EXTRA_BUILD_ARGS"
+ access_token="$access_token"
+ ROOT_JOB_ID="$ROOT_JOB_ID"
+ GOPOGH_DB_BACKEND="$GOPOGH_DB_BACKEND"
+ GOPOGH_DB_HOST="$GOPOGH_DB_HOST"
+ GOPOGH_DB_PATH="$GOPOGH_DB_PATH"
 
  # Prevent cloud-shell is ephemeral warnings on apt-get
+ mkdir ~/.cloudshell
  touch ~/.cloudshell/no-apt-get-warning
 
  gsutil -m cp -r gs://minikube-builds/${MINIKUBE_LOCATION}/installers .
@@ -47,3 +53,14 @@ gcloud cloud-shell ssh --authorize-session << EOF
  chmod +x ./common.sh
  source ./common.sh
 EOF
+
+code=$?
+if [ $code -gt 0 ]; then
+    curl -L -u minikube-bot:${access_token} \
+      "https://api.github.com/repos/kubernetes/minikube/statuses/${COMMIT}" \
+      -H "Content-Type: application/json" \
+      -X POST \
+      -d "{\"state\": \"failure\", \"description\": \"Jenkins: Cloud Shell failed to start\", \"target_url\": \"https://storage.googleapis.com/minikube-builds/logs/${MINIKUBE_LOCATION}/${ROOT_JOB_ID}/Docker_Cloud_Shell.html\", \"context\": \"Docker_Cloud_Shell\"}"
+fi
+
+exit $code

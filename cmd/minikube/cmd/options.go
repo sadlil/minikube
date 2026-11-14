@@ -31,12 +31,12 @@ var optionsCmd = &cobra.Command{
 	Use:    "options",
 	Short:  "Show a list of global command-line options (applies to all commands).",
 	Long:   "Show a list of global command-line options (applies to all commands).",
-	Hidden: true,
+	Hidden: false,
 	Run:    runOptions,
 }
 
 // runOptions handles the executes the flow of "minikube options"
-func runOptions(cmd *cobra.Command, args []string) {
+func runOptions(cmd *cobra.Command, _ []string) {
 	out.String("The following options can be passed to any command:\n\n")
 	cmd.Root().PersistentFlags().VisitAll(func(flag *pflag.Flag) {
 		out.String(flagUsage(flag))

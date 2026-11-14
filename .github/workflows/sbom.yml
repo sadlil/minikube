@@ -1,0 +1,29 @@
+name: Generate SBOM
+on:
+  workflow_dispatch:
+  release:
+    types: [published]
+permissions:
+  contents: write
+jobs:
+  generate_sbom_action:
+    runs-on: ubuntu-latest
+    name: Install bom and generate SBOM
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        timeout-minutes: 1
+      - name: Install bom
+        uses: kubernetes-sigs/release-actions/setup-bom@b5b8280a60e6e20607f77068011269b982c60971 # main
+        timeout-minutes: 1
+      - name: Generage SBOM
+        timeout-minutes: 3
+        run: |
+          bom generate -o minikube_${{github.ref_name}}_sbom.spdx \
+          --dirs=.\
+      - name: Upload SBOM
+        timeout-minutes: 1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release upload ${{github.ref_name}} minikube_${{github.ref_name}}_sbom.spdx

@@ -19,6 +19,7 @@ package config
 import (
 	"fmt"
 	"net"
+	"net/netip"
 	"net/url"
 	"os"
 	"strconv"
@@ -32,7 +33,7 @@ import (
 )
 
 // IsValidDriver checks if a driver is supported
-func IsValidDriver(string, name string) error {
+func IsValidDriver(_, name string) error {
 	if driver.Supported(name) {
 		return nil
 	}
@@ -40,13 +41,13 @@ func IsValidDriver(string, name string) error {
 }
 
 // RequiresRestartMsg returns the "requires restart" message
-func RequiresRestartMsg(string, string) error {
+func RequiresRestartMsg(_, _ string) error {
 	out.WarningT("These changes will take effect upon a minikube delete and then a minikube start")
 	return nil
 }
 
 // IsValidDiskSize checks if a string is a valid disk size
-func IsValidDiskSize(name string, disksize string) error {
+func IsValidDiskSize(_, disksize string) error {
 	_, err := units.FromHumanSize(disksize)
 	if err != nil {
 		return fmt.Errorf("invalid disk size: %v", err)
@@ -55,16 +56,16 @@ func IsValidDiskSize(name string, disksize string) error {
 }
 
 // IsValidCPUs checks if a string is a valid number of CPUs
-func IsValidCPUs(name string, cpus string) error {
-	if cpus == constants.MaxResources {
+func IsValidCPUs(name, cpus string) error {
+	if cpus == constants.MaxResources || cpus == constants.NoLimit {
 		return nil
 	}
 	return IsPositive(name, cpus)
 }
 
 // IsValidMemory checks if a string is a valid memory size
-func IsValidMemory(name string, memsize string) error {
-	if memsize == constants.MaxResources {
+func IsValidMemory(_, memsize string) error {
+	if memsize == constants.MaxResources || memsize == constants.NoLimit {
 		return nil
 	}
 	_, err := units.FromHumanSize(memsize)
@@ -75,7 +76,7 @@ func IsValidMemory(name string, memsize string) error {
 }
 
 // IsValidURL checks if a location is a valid URL
-func IsValidURL(name string, location string) error {
+func IsValidURL(_, location string) error {
 	_, err := url.Parse(location)
 	if err != nil {
 		return fmt.Errorf("%s is not a valid URL", location)
@@ -84,7 +85,7 @@ func IsValidURL(name string, location string) error {
 }
 
 // IsURLExists checks if a location actually exists
-func IsURLExists(name string, location string) error {
+func IsURLExists(_, location string) error {
 	parsed, err := url.Parse(location)
 	if err != nil {
 		return fmt.Errorf("%s is not a valid URL", location)
@@ -118,7 +119,7 @@ func IsURLExists(name string, location string) error {
 }
 
 // IsPositive checks if an integer is positive
-func IsPositive(name string, val string) error {
+func IsPositive(name, val string) error {
 	i, err := strconv.Atoi(val)
 	if err != nil {
 		return fmt.Errorf("%s:%v", name, err)
@@ -130,7 +131,7 @@ func IsPositive(name string, val string) error {
 }
 
 // IsValidCIDR checks if a string parses as a CIDR
-func IsValidCIDR(name string, cidr string) error {
+func IsValidCIDR(_, cidr string) error {
 	_, _, err := net.ParseCIDR(cidr)
 	if err != nil {
 		return fmt.Errorf("invalid CIDR: %v", err)
@@ -139,7 +140,7 @@ func IsValidCIDR(name string, cidr string) error {
 }
 
 // IsValidPath checks if a string is a valid path
-func IsValidPath(name string, path string) error {
+func IsValidPath(name, path string) error {
 	_, err := os.Stat(path)
 	if err != nil {
 		return fmt.Errorf("%s path is not valid: %v", name, err)
@@ -148,10 +149,20 @@ func IsValidPath(name string, path string) error {
 }
 
 // IsValidRuntime checks if a string is a valid runtime
-func IsValidRuntime(name string, runtime string) error {
+func IsValidRuntime(_, runtime string) error {
 	_, err := cruntime.New(cruntime.Config{Type: runtime})
 	if err != nil {
 		return fmt.Errorf("invalid runtime: %v", err)
+	}
+	return nil
+}
+
+// IsValidIPAddressSlice checks that a comma-separated value contains only valid IP addresses (IPv4 or IPv6)
+func IsValidIPAddressSlice(name, val string) error {
+	for s := range strings.SplitSeq(val, ",") {
+		if _, err := netip.ParseAddr(s); err != nil {
+			return fmt.Errorf("%s: %q is not a valid IP address", name, s)
+		}
 	}
 	return nil
 }

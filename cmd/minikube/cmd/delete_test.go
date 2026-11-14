@@ -18,22 +18,25 @@ package cmd
 
 import (
 	"fmt"
-	"io/ioutil"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"testing"
+	"time"
 
-	"github.com/docker/machine/libmachine"
 	"github.com/google/go-cmp/cmp"
 	"github.com/otiai10/copy"
 	"github.com/spf13/viper"
+	"k8s.io/minikube/pkg/libmachine"
 
 	cmdcfg "k8s.io/minikube/cmd/minikube/cmd/config"
 	"k8s.io/minikube/pkg/minikube/config"
 	"k8s.io/minikube/pkg/minikube/localpath"
+	"k8s.io/minikube/pkg/minikube/run"
 )
 
-// except returns a list of strings, minus the excluded ones
+// exclude returns a list of strings, minus the excluded ones
 func exclude(vals []string, exclude []string) []string {
 	result := []string{}
 	for _, v := range vals {
@@ -53,7 +56,7 @@ func exclude(vals []string, exclude []string) []string {
 
 func fileNames(path string) ([]string, error) {
 	result := []string{}
-	fis, err := ioutil.ReadDir(path)
+	fis, err := os.ReadDir(path)
 	if err != nil {
 		return result, err
 	}
@@ -64,20 +67,9 @@ func fileNames(path string) ([]string, error) {
 }
 
 func TestDeleteProfile(t *testing.T) {
-	td, err := ioutil.TempDir("", "single")
-	if err != nil {
-		t.Fatalf("tempdir: %v", err)
-	}
+	td := t.TempDir()
 
-	t.Cleanup(func() {
-		err := os.RemoveAll(td)
-		if err != nil {
-			t.Errorf("failed to clean up temp folder  %q", td)
-		}
-	})
-
-	err = copy.Copy("../../../pkg/minikube/config/testdata/delete-single", td)
-	if err != nil {
+	if err := copy.Copy("../../../pkg/minikube/config/testdata/delete-single", td); err != nil {
 		t.Fatalf("copy: %v", err)
 	}
 
@@ -96,12 +88,10 @@ func TestDeleteProfile(t *testing.T) {
 		{"partial-mach", "p8_partial_machine_config", []string{"p8_partial_machine_config"}},
 	}
 
+	options := &run.CommandOptions{}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err = os.Setenv(localpath.MinikubeHome, td)
-			if err != nil {
-				t.Errorf("setenv: %v", err)
-			}
+			t.Setenv(localpath.MinikubeHome, td)
 
 			beforeProfiles, err := fileNames(filepath.Join(localpath.MiniPath(), "profiles"))
 			if err != nil {
@@ -118,7 +108,7 @@ func TestDeleteProfile(t *testing.T) {
 			}
 
 			hostAndDirsDeleter = hostAndDirsDeleterMock
-			errs := DeleteProfiles([]*config.Profile{profile})
+			errs := DeleteProfiles([]*config.Profile{profile}, options)
 			if len(errs) > 0 {
 				HandleDeletionErrors(errs)
 				t.Errorf("Errors while deleting profiles: %v", errs)
@@ -158,9 +148,7 @@ func TestDeleteProfile(t *testing.T) {
 	}
 }
 
-var hostAndDirsDeleterMock = func(api libmachine.API, cc *config.ClusterConfig, profileName string) error {
-	return deleteContextTest()
-}
+var hostAndDirsDeleterMock = func(_ libmachine.API, _ *config.ClusterConfig, _ string) error { return deleteContextTest() }
 
 func deleteContextTest() error {
 	if err := cmdcfg.Unset(config.ProfileName); err != nil {
@@ -170,26 +158,13 @@ func deleteContextTest() error {
 }
 
 func TestDeleteAllProfiles(t *testing.T) {
-	td, err := ioutil.TempDir("", "all")
-	if err != nil {
-		t.Fatalf("tempdir: %v", err)
-	}
-	defer func() { // clean up tempdir
-		err := os.RemoveAll(td)
-		if err != nil {
-			t.Errorf("failed to clean up temp folder  %q", td)
-		}
-	}()
+	td := t.TempDir()
 
-	err = copy.Copy("../../../pkg/minikube/config/testdata/delete-all", td)
-	if err != nil {
+	if err := copy.Copy("../../../pkg/minikube/config/testdata/delete-all", td); err != nil {
 		t.Fatalf("copy: %v", err)
 	}
 
-	err = os.Setenv(localpath.MinikubeHome, td)
-	if err != nil {
-		t.Errorf("error setting up test environment. could not set %s", localpath.MinikubeHome)
-	}
+	t.Setenv(localpath.MinikubeHome, td)
 
 	pFiles, err := fileNames(filepath.Join(localpath.MiniPath(), "profiles"))
 	if err != nil {
@@ -221,9 +196,10 @@ func TestDeleteAllProfiles(t *testing.T) {
 		t.Errorf("ListProfiles length = %d, expected %d\nvalid: %v\ninvalid: %v\n", len(validProfiles)+len(inValidProfiles), numberOfTotalProfileDirs, validProfiles, inValidProfiles)
 	}
 
-	profiles := append(validProfiles, inValidProfiles...)
+	profiles := validProfiles
+	profiles = append(profiles, inValidProfiles...)
 	hostAndDirsDeleter = hostAndDirsDeleterMock
-	errs := DeleteProfiles(profiles)
+	errs := DeleteProfiles(profiles, &run.CommandOptions{})
 
 	if errs != nil {
 		t.Errorf("errors while deleting all profiles: %v", errs)
@@ -233,7 +209,7 @@ func TestDeleteAllProfiles(t *testing.T) {
 	if err != nil {
 		t.Errorf("profiles: %v", err)
 	}
-	afterMachines, err := ioutil.ReadDir(filepath.Join(localpath.MiniPath(), "machines"))
+	afterMachines, err := os.ReadDir(filepath.Join(localpath.MiniPath(), "machines"))
 	if err != nil {
 		t.Errorf("machines: %v", err)
 	}
@@ -246,4 +222,163 @@ func TestDeleteAllProfiles(t *testing.T) {
 	}
 
 	viper.Set(config.ProfileName, "")
+}
+
+// TestTryKillOne spawns a go child process that waits to be SIGKILLed,
+// then tries to execute the tryKillOne function on it;
+// if after tryKillOne the process still exists, we consider it a failure
+func TestTryKillOne(t *testing.T) {
+
+	var waitForSig = []byte(`
+package main
+
+import (
+	"os"
+	"os/signal"
+	"syscall"
+)
+
+// This is used to unit test functions that send termination
+// signals to processes, in a cross-platform way.
+func main() {
+	ch := make(chan os.Signal, 1)
+	done := make(chan struct{})
+	defer close(ch)
+
+	signal.Notify(ch, syscall.SIGTERM)
+	defer signal.Stop(ch)
+
+	go func() {
+		<-ch
+		close(done)
+	}()
+
+	<-done
+}
+`)
+	td := t.TempDir()
+	tmpfile := filepath.Join(td, "waitForSig.go")
+
+	if err := os.WriteFile(tmpfile, waitForSig, 0o600); err != nil {
+		t.Fatalf("copying source to %s: %v\n", tmpfile, err)
+	}
+
+	processToKill := exec.Command("go", "run", tmpfile)
+	err := processToKill.Start()
+	if err != nil {
+		t.Fatalf("while executing child process: %v\n", err)
+	}
+	pid := processToKill.Process.Pid
+
+	originalIsMinikubeProcess := isMinikubeProcess
+	defer func() { isMinikubeProcess = originalIsMinikubeProcess }()
+	isMinikubeProcess = func(int) (bool, error) {
+		return true, nil
+	}
+
+	err = trySigKillProcess(pid)
+	if err != nil {
+		t.Fatalf("while trying to kill child proc %d: %v\n", pid, err)
+	}
+
+	done := make(chan error, 1)
+	go func() { done <- processToKill.Wait() }()
+
+	var waitErr error
+	select {
+	case waitErr = <-done:
+		t.Logf("child process wait result: %v", waitErr)
+	case <-time.After(1 * time.Second):
+		t.Fatalf("timed out waiting for process %d to exit", pid)
+	}
+
+}
+
+// TestIsMinikubeProcess validates the process name matching logic using real OS processes.
+// It ensures that `isMinikubeProcess` correctly identifies Minikube-related processes
+// based on their binary name, which is critical for safe cleanup during `minikube delete`
+// and avoids accidentally killing unrelated user processes.
+func TestIsMinikubeProcess(t *testing.T) {
+	// 1. Write a simple Go program that waits for a signal (mimicking a long-running process)
+	var waitForSig = []byte(`
+package main
+
+import (
+	"os"
+	"os/signal"
+	"syscall"
+)
+
+func main() {
+	ch := make(chan os.Signal, 1)
+	signal.Notify(ch, syscall.SIGTERM)
+	<-ch
+}
+`)
+	td := t.TempDir()
+	srcFile := filepath.Join(td, "main.go")
+	if err := os.WriteFile(srcFile, waitForSig, 0o600); err != nil {
+		t.Fatalf("failed to write source: %v", err)
+	}
+
+	// 2. Build binaries with different names
+	// Case A: Name contains "minikube"
+	mkBin := filepath.Join(td, "fake-minikube")
+	if runtime.GOOS == "windows" {
+		mkBin += ".exe"
+	}
+	buildBinary(t, srcFile, mkBin)
+
+	// Case B: Name does NOT contain "minikube"
+	otherBin := filepath.Join(td, "other-process")
+	if runtime.GOOS == "windows" {
+		otherBin += ".exe"
+	}
+	buildBinary(t, srcFile, otherBin)
+
+	// 3. Run and verify
+	tests := []struct {
+		name       string
+		binaryPath string
+		want       bool
+	}{
+		{"minikube-process", mkBin, true},
+		{"other-process", otherBin, false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cmd := exec.Command(tc.binaryPath)
+			if err := cmd.Start(); err != nil {
+				t.Fatalf("failed to start %s: %v", tc.name, err)
+			}
+			pid := cmd.Process.Pid
+			t.Logf("Started %s with pid %d", tc.name, pid)
+
+			defer func() {
+				_ = cmd.Process.Kill()
+				_ = cmd.Wait()
+			}()
+
+			// Give it a moment to start and register in OS
+			// (On some CI systems, checking too fast might fail or return partial info)
+			time.Sleep(100 * time.Millisecond)
+
+			got, err := isMinikubeProcess(pid)
+			if err != nil {
+				t.Errorf("isMinikubeProcess(%d) returned unexpected error: %v", pid, err)
+			}
+			if got != tc.want {
+				t.Errorf("isMinikubeProcess(%d) [%s] = %v; want %v", pid, tc.binaryPath, got, tc.want)
+			}
+		})
+	}
+}
+
+func buildBinary(t *testing.T, src, out string) {
+	t.Helper()
+	cmd := exec.Command("go", "build", "-o", out, src)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("failed to build %s: %v\nOutput: %s", out, err, string(output))
+	}
 }

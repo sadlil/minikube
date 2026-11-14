@@ -26,7 +26,7 @@ import (
 	"runtime"
 	"strconv"
 
-	"github.com/pkg/errors"
+	"errors"
 	"gonum.org/v1/plot"
 	"gonum.org/v1/plot/plotter"
 	"gonum.org/v1/plot/plotutil"
@@ -37,9 +37,9 @@ var FOLDER = "site/static/images/benchmarks/cpuUsage/autoPause"
 
 type integerTicks struct{}
 
-func (integerTicks) Ticks(min, max float64) []plot.Tick {
+func (integerTicks) Ticks(minimum, maximum float64) []plot.Tick {
 	var t []plot.Tick
-	for i := math.Trunc(min); i <= max; i += 50 {
+	for i := math.Trunc(minimum); i <= maximum; i += 50 {
 		t = append(t, plot.Tick{Value: i, Label: fmt.Sprint(i)})
 	}
 	return t
@@ -54,28 +54,30 @@ func main() {
 
 func execute() error {
 	// sessionID is generated and used at cpu usage benchmark
-	sessionID := os.Args[1]
-	if len(sessionID) == 0 {
+	if len(os.Args) <= 1 || len(os.Args[1]) == 0 {
 		return errors.New("Please identify sessionID")
 	}
+	sessionID := os.Args[1]
 
 	// Create plot instance
 	p := plot.New()
 
 	// Set view options
-	if runtime.GOOS == "darwin" {
+	switch runtime.GOOS {
+	case "darwin":
 		p.Title.Text = "CPU% Busy Overhead - With Auto Pause vs. Non Auto Pause (less is better)"
-	} else if runtime.GOOS == "linux" {
+	case "linux":
 		p.Title.Text = "CPU% Busy Overhead - With Auto Pause vs. Non Auto Pause (less is better)"
 	}
+
 	p.Y.Label.Text = "CPU overhead%"
 
 	// Open non-autopause csv file of benchmark summary
 	napResults := []float64{}
-	var napFn string = "./out/benchmark-results/" + sessionID + "/cstat.nonautopause.summary"
+	napFn := "./out/benchmark-results/" + sessionID + "/cstat.nonautopause.summary"
 	napFile, err := os.Open(napFn)
 	if err != nil {
-		return errors.Wrap(err, "Missing summary csv")
+		return fmt.Errorf("Missing summary csv: %w", err)
 	}
 	defer napFile.Close()
 
@@ -90,17 +92,17 @@ func execute() error {
 
 		s, err := strconv.ParseFloat(napLine[0], 64)
 		if err != nil {
-			return errors.Wrap(err, "Failed to convert to float64")
+			return fmt.Errorf("Failed to convert to float64: %w", err)
 		}
 		napResults = append(napResults, s)
 	}
 
 	// Open auto-pause csv file of benchmark summary
 	apResults := []float64{}
-	var apFn string = "./out/benchmark-results/" + sessionID + "/cstat.autopause.summary"
+	apFn := "./out/benchmark-results/" + sessionID + "/cstat.autopause.summary"
 	apFile, err := os.Open(apFn)
 	if err != nil {
-		return errors.Wrap(err, "Missing summary csv")
+		return fmt.Errorf("Missing summary csv: %w", err)
 	}
 	defer apFile.Close()
 
@@ -115,7 +117,7 @@ func execute() error {
 
 		s, err := strconv.ParseFloat(apLine[0], 64)
 		if err != nil {
-			return errors.Wrap(err, "Failed to convert to float64")
+			return fmt.Errorf("Failed to convert to float64: %w", err)
 		}
 		apResults = append(apResults, s)
 	}
@@ -126,7 +128,7 @@ func execute() error {
 	// Create Bar instance with non-autopause benchmark results
 	barNAP, err := plotter.NewBarChart(plotter.Values(napResults), breadth)
 	if err != nil {
-		return errors.Wrap(err, "Failed to create bar chart")
+		return fmt.Errorf("Failed to create bar chart: %w", err)
 	}
 
 	// Set border of the bar graph. 0 is no border color
@@ -139,7 +141,7 @@ func execute() error {
 	// Create Bar instance with auto-pause benchmark results
 	barAP, err := plotter.NewBarChart(plotter.Values(apResults), breadth)
 	if err != nil {
-		return errors.Wrap(err, "Failed to create bar chart")
+		return fmt.Errorf("Failed to create bar chart: %w", err)
 	}
 
 	// Set border of the bar graph. 0 is no border color
@@ -158,9 +160,10 @@ func execute() error {
 	p.Legend.Top = true
 
 	// Add x-lay names
-	if runtime.GOOS == "darwin" {
+	switch runtime.GOOS {
+	case "darwin":
 		p.NominalX("OS idle", "minikube hyperkit", "minikube virtualbox", "minikube docker", "Docker for Mac Kubernetes", "k3d", "kind")
-	} else if runtime.GOOS == "linux" {
+	case "linux":
 		p.NominalX("OS idle", "minikube kvm2", "minikube virtualbox", "minikube docker", "Docker idle", "k3d", "kind")
 	}
 
@@ -223,16 +226,18 @@ func execute() error {
 	p.Add(napl, apl)
 
 	// Output bar graph
-	if runtime.GOOS == "darwin" {
+	switch runtime.GOOS {
+	case "darwin":
 		if err := p.Save(13*vg.Inch, 8*vg.Inch, FOLDER+"/mac.png"); err != nil {
-			return errors.Wrap(err, "Failed to create bar graph png")
+			return fmt.Errorf("Failed to create bar graph png: %w", err)
 		}
 		log.Printf("Generated graph png to %s/mac.png", FOLDER)
-	} else if runtime.GOOS == "linux" {
+	case "linux":
 		if err := p.Save(13*vg.Inch, 10*vg.Inch, FOLDER+"/linux.png"); err != nil {
-			return errors.Wrap(err, "Failed to create bar graph png")
+			return fmt.Errorf("Failed to create bar graph png: %w", err)
 		}
 		log.Printf("Generated graph png to %s/linux.png", FOLDER)
 	}
+
 	return nil
 }

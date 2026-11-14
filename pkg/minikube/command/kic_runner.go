@@ -18,9 +18,9 @@ package command
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"os"
 	"os/exec"
 	"path"
@@ -29,7 +29,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/pkg/errors"
 	"golang.org/x/term"
 	"k8s.io/klog/v2"
 	"k8s.io/minikube/pkg/drivers/kic/oci"
@@ -44,11 +43,11 @@ type kicRunner struct {
 	ociBin   string
 }
 
-// NewKICRunner returns a kicRunner implementor of runner which runs cmds inside a container
-func NewKICRunner(containerNameOrID string, oci string) Runner {
+// NewKICRunner returns a kicRunner implementer of runner which runs cmds inside a container
+func NewKICRunner(containerNameOrID string, ociName string) Runner {
 	return &kicRunner{
 		nameOrID: containerNameOrID,
-		ociBin:   oci, // docker or podman
+		ociBin:   ociName, // docker or podman
 	}
 }
 
@@ -125,19 +124,21 @@ func (k *kicRunner) RunCmd(cmd *exec.Cmd) (*RunResult, error) {
 		}
 		return rr, nil
 	}
-	if exitError, ok := err.(*exec.ExitError); ok {
-		rr.ExitCode = exitError.ExitCode()
-	}
+	rr.ExitCode = k.exitCode(err)
 	return rr, fmt.Errorf("%s: %v\nstdout:\n%s\nstderr:\n%s", rr.Command(), err, rr.Stdout.String(), rr.Stderr.String())
 
 }
 
-func (k *kicRunner) StartCmd(cmd *exec.Cmd) (*StartedCmd, error) {
-	return nil, fmt.Errorf("kicRunner does not support StartCmd - you could be the first to add it")
+func (k *kicRunner) StartCmd(_ *exec.Cmd) (*StartedCmd, error) {
+	return nil, errors.New("kicRunner does not support StartCmd - you could be the first to add it")
 }
 
-func (k *kicRunner) WaitCmd(sc *StartedCmd) (*RunResult, error) {
-	return nil, fmt.Errorf("kicRunner does not support WaitCmd - you could be the first to add it")
+func (k *kicRunner) WaitCmd(_ *StartedCmd) (*RunResult, error) {
+	return nil, errors.New("kicRunner does not support WaitCmd - you could be the first to add it")
+}
+
+func (k *kicRunner) ReadableFile(_ string) (assets.ReadableFile, error) {
+	return nil, errors.New("kicRunner does not support ReadableFile - you could be the first to add it")
 }
 
 // Copy copies a file and its permissions
@@ -163,7 +164,7 @@ func (k *kicRunner) Copy(f assets.CopyableFile) error {
 
 	perms, err := strconv.ParseInt(f.GetPermissions(), 8, 0)
 	if err != nil || perms > 07777 {
-		return errors.Wrapf(err, "error converting permissions %s to integer", f.GetPermissions())
+		return fmt.Errorf("error converting permissions %s to integer: %w", f.GetPermissions(), err)
 	}
 
 	if src != assets.MemorySource {
@@ -189,19 +190,29 @@ func (k *kicRunner) Copy(f assets.CopyableFile) error {
 
 	tmpFolder, err := tempDirectory(detect.MinikubeInstalledViaSnap(), detect.DockerInstalledViaSnap())
 	if err != nil {
-		return errors.Wrap(err, "determining temp directory")
+		return fmt.Errorf("determining temp directory: %w", err)
 	}
 
-	tf, err := ioutil.TempFile(tmpFolder, "tmpf-memory-asset")
+	tf, err := os.CreateTemp(tmpFolder, "tmpf-memory-asset")
 	if err != nil {
-		return errors.Wrap(err, "creating temporary file")
+		return fmt.Errorf("creating temporary file: %w", err)
 	}
+	defer tf.Close()
 	defer os.Remove(tf.Name())
 
 	if err := writeFile(tf.Name(), f, os.FileMode(perms)); err != nil {
-		return errors.Wrap(err, "write")
+		return fmt.Errorf("write: %w", err)
 	}
 	return k.copy(tf.Name(), dst)
+}
+
+// CopyFrom copies a file
+func (k *kicRunner) CopyFrom(f assets.CopyableFile) error {
+	src := f.GetTargetPath()
+	dst := f.GetSourcePath()
+
+	klog.Infof("%s (direct): %s --> %s", k.ociBin, src, dst)
+	return k.copyFrom(src, dst)
 }
 
 // tempDirectory returns the directory to use as the temp directory
@@ -216,7 +227,7 @@ func tempDirectory(isMinikubeSnap bool, isDockerSnap bool) (string, error) {
 
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return "", errors.Wrap(err, "detecting home dir")
+		return "", fmt.Errorf("detecting home dir: %w", err)
 	}
 	return home, nil
 }
@@ -227,6 +238,14 @@ func (k *kicRunner) copy(src string, dst string) error {
 		return copyToPodman(src, fullDest)
 	}
 	return copyToDocker(src, fullDest)
+}
+
+func (k *kicRunner) copyFrom(src string, dst string) error {
+	fullSource := fmt.Sprintf("%s:%s", k.nameOrID, src)
+	if k.ociBin == oci.Podman {
+		return copyToPodman(fullSource, dst)
+	}
+	return copyToDocker(fullSource, dst)
 }
 
 func (k *kicRunner) chmod(dst string, perm string) error {
@@ -240,7 +259,7 @@ func copyToPodman(src string, dest string) error {
 		cmd := oci.PrefixCmd(exec.Command(oci.Podman, "cp", src, dest))
 		klog.Infof("Run: %v", cmd)
 		if out, err := cmd.CombinedOutput(); err != nil {
-			return errors.Wrapf(err, "podman copy %s into %s, output: %s", src, dest, string(out))
+			return fmt.Errorf("podman copy %s into %s, output: %s: %w", src, dest, string(out), err)
 		}
 	} else {
 		file, err := os.Open(src)
@@ -250,12 +269,12 @@ func copyToPodman(src string, dest string) error {
 		defer file.Close()
 		parts := strings.Split(dest, ":")
 		container := parts[0]
-		path := parts[1]
-		cmd := exec.Command(oci.Podman, "exec", "-i", container, "tee", path)
+		containerPath := parts[1]
+		cmd := exec.Command(oci.Podman, "exec", "-i", container, "tee", containerPath)
 		cmd.Stdin = file
 		klog.Infof("Run: %v", cmd)
 		if err := cmd.Run(); err != nil {
-			return errors.Wrapf(err, "podman copy %s into %s", src, dest)
+			return fmt.Errorf("podman copy %s into %s: %w", src, dest, err)
 		}
 	}
 	return nil
@@ -263,7 +282,7 @@ func copyToPodman(src string, dest string) error {
 
 func copyToDocker(src string, dest string) error {
 	if out, err := oci.PrefixCmd(exec.Command(oci.Docker, "cp", "-a", src, dest)).CombinedOutput(); err != nil {
-		return errors.Wrapf(err, "docker copy %s into %s, output: %s", src, dest, string(out))
+		return fmt.Errorf("docker copy %s into %s, output: %s: %w", src, dest, string(out), err)
 	}
 	return nil
 }
@@ -275,6 +294,18 @@ func (k *kicRunner) Remove(f assets.CopyableFile) error {
 
 	_, err := k.RunCmd(exec.Command("sudo", "rm", dst))
 	return err
+}
+
+// exitCode extracts the exit code from an exec error.
+// docker/podman exec propagates the container's exit code (including
+// 127 for missing binaries) as the process exit code, so
+// *exec.ExitError is sufficient — no special handling needed unlike
+// execRunner.
+func (*kicRunner) exitCode(err error) int {
+	if exitError, ok := err.(*exec.ExitError); ok {
+		return exitError.ExitCode()
+	}
+	return 0
 }
 
 // isTerminal returns true if the writer w is a terminal

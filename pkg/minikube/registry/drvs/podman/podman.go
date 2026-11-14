@@ -27,21 +27,22 @@ import (
 	"time"
 
 	"github.com/blang/semver/v4"
-	"github.com/docker/machine/libmachine/drivers"
 	"k8s.io/klog/v2"
 	"k8s.io/minikube/pkg/drivers/kic"
 	"k8s.io/minikube/pkg/drivers/kic/oci"
+	"k8s.io/minikube/pkg/libmachine/drivers"
 	"k8s.io/minikube/pkg/minikube/config"
 	"k8s.io/minikube/pkg/minikube/driver"
 	"k8s.io/minikube/pkg/minikube/localpath"
 	"k8s.io/minikube/pkg/minikube/out"
 	"k8s.io/minikube/pkg/minikube/registry"
+	"k8s.io/minikube/pkg/minikube/run"
 )
 
 var docURL = "https://minikube.sigs.k8s.io/docs/drivers/podman/"
 
 // minReqPodmanVer is required the minimum version of podman to be installed for podman driver.
-var minReqPodmanVer = semver.Version{Major: 2, Minor: 1, Patch: 0}
+var minReqPodmanVer = semver.Version{Major: 4, Minor: 9, Patch: 0}
 
 func init() {
 	priority := registry.Default
@@ -55,12 +56,14 @@ func init() {
 	// - Windows (podman-remote)
 
 	if err := registry.Register(registry.DriverDef{
-		Name:     driver.Podman,
-		Config:   configure,
-		Init:     func() drivers.Driver { return kic.NewDriver(kic.Config{OCIBinary: oci.Podman}) },
-		Status:   status,
-		Default:  true,
-		Priority: priority,
+		Name:         driver.Podman,
+		Config:       configure,
+		Init:         func(_ *run.CommandOptions) drivers.Driver { return kic.NewDriver(kic.Config{OCIBinary: oci.Podman}) },
+		Status:       status,
+		Default:      true,
+		Priority:     priority,
+		Parallel:     true,
+		ProbeTimeout: 6 * time.Second,
 	}); err != nil {
 		panic(fmt.Sprintf("register failed: %v", err))
 	}
@@ -96,23 +99,26 @@ func configure(cc config.ClusterConfig, n config.Node) (interface{}, error) {
 		ContainerRuntime:  cc.KubernetesConfig.ContainerRuntime,
 		ExtraArgs:         extraArgs,
 		ListenAddress:     cc.ListenAddress,
+		Subnet:            cc.Subnet,
 	}), nil
 }
 
-func status() registry.State {
+func status(_ *run.CommandOptions) registry.State {
 	podman, err := exec.LookPath(oci.Podman)
 	if err != nil {
 		return registry.State{Error: err, Installed: false, Healthy: false, Fix: "Install Podman", Doc: docURL}
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
+	timeout := registry.Driver(driver.Podman).ProbeTimeout
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
 	// Quickly returns an error code if service is not running
 	cmd := exec.CommandContext(ctx, oci.Podman, "version", "--format", "{{.Server.Version}}")
 	// Run with sudo on linux (local), otherwise podman-remote (as podman)
 	if runtime.GOOS == "linux" {
-		cmd = exec.CommandContext(ctx, "sudo", "-k", "-n", oci.Podman, "version", "--format", "{{.Version}}")
+		cmd = exec.CommandContext(ctx, oci.Podman, "version", "--format", "{{.Version}}")
+		cmd = oci.PrefixCmd(cmd, oci.WithSudoFlags("-k"))
 		cmd.Env = append(os.Environ(), "LANG=C", "LC_ALL=C") // sudo is localized
 	}
 	o, err := cmd.Output()
@@ -122,7 +128,7 @@ func status() registry.State {
 
 		v, err := semver.Make(output)
 		if err != nil {
-			return registry.State{Error: err, Installed: true, Running: true, Healthy: false, Fix: "Cant verify minimum required version for podman . See podman website for installation guide.", Doc: "https://podman.io/getting-started/installation.html"}
+			return registry.State{Error: err, Installed: true, Running: true, Healthy: false, Fix: "Can't verify minimum required version for podman . See podman website for installation guide.", Doc: "https://podman.io/getting-started/installation.html"}
 		}
 
 		if v.LT(minReqPodmanVer) {
@@ -150,7 +156,7 @@ func status() registry.State {
 		newErr := fmt.Errorf(`%q %v: %s`, strings.Join(cmd.Args, " "), exitErr, stderr)
 
 		if strings.Contains(stderr, "a password is required") && runtime.GOOS == "linux" {
-			return registry.State{Error: newErr, Installed: true, Healthy: false, Fix: fmt.Sprintf("Add your user to the 'sudoers' file: '%s ALL=(ALL) NOPASSWD: %s'", username, podman), Doc: "https://podman.io"}
+			return registry.State{Error: newErr, Installed: true, Healthy: false, Fix: fmt.Sprintf("Add your user to the 'sudoers' file: '%s ALL=(ALL) NOPASSWD: %s' , or run 'minikube config set rootless true'", username, podman), Doc: "https://podman.io"}
 		}
 
 		// Typical low-level errors from running podman-remote:

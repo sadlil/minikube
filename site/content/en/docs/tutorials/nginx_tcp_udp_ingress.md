@@ -202,6 +202,16 @@ Connected to 192.168.99.179.
 Escape character is '^]'
 ```
 
+You can chat with the redis service:
+
+```text
+SET minikube:1 "it works!"
++OK
+GET minikube:1
+$9
+it works!
+```
+
 To exit telnet enter the `Ctrl` key and `]` at the same time. Then type `quit` and press enter.
 
 If you were not able to connect please review your steps above.
@@ -228,5 +238,4 @@ for the latest info on these potential changes.
 
 ## Related articles
 
-- [Routing traffic multiple services on ports 80 and 443 in minikube with the Kubernetes Ingress resource](https://kubernetes.io/docs/tasks/access-application-cluster/ingress-minikube/)
 - [Use port forwarding to access applications in a cluster](https://kubernetes.io/docs/tasks/access-application-cluster/port-forward-access-application-cluster/)

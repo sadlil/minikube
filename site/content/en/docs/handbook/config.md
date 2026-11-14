@@ -2,7 +2,7 @@
 title: "Configuration"
 weight: 4
 description: >
-  Configuring your cluster 
+  Configuring your cluster
 aliases:
   - /docs/reference/environment_variables/
   - /docs/reference/configuration/kubernetes/
@@ -21,10 +21,10 @@ minikube start --help
 
 minikube allows users to persistently store new default values to be used across all profiles, using the `minikube config` command. This is done providing a property name, and a property value.
 
-For example, to persistently configure minikube to use hyperkit:
+For example, to persistently configure minikube to use vfkit:
 
 ```shell
-minikube config set driver hyperkit
+minikube config set driver vfkit
 ```
 
 You can get a complete list of configurable fields using:
@@ -50,10 +50,10 @@ This flag is repeated, so you can pass it several times with several different v
 By default, minikube installs the latest stable version of Kubernetes that was available at the time of the minikube release. You may select a different Kubernetes release by using the `--kubernetes-version` flag, for example:
 
 ```shell
-minikube start --kubernetes-version=v1.11.10
+minikube start --kubernetes-version=<k8sversion>
 ```
-  
-minikube follows the [Kubernetes Version and Version Skew Support Policy](https://kubernetes.io/docs/setup/version-skew-policy/), so we guarantee support for the latest build for the last 3 minor Kubernetes releases. When practical, minikube aims to support older releases as well so that users can emulate legacy environments.
+
+minikube follows the [Kubernetes Version and Version Skew Support Policy](https://kubernetes.io/docs/setup/version-skew-policy/), supporting the latest build for the last 3 minor Kubernetes releases. Users who need older Kubernetes releases can use an older minikube version.
 
 For up to date information on supported versions, see `OldestKubernetesVersion` and `NewestKubernetesVersion` in [constants.go](https://github.com/kubernetes/minikube/blob/master/pkg/minikube/constants/constants.go)
 
@@ -89,16 +89,23 @@ minikube start --extra-config=kubeadm.ignore-preflight-errors=SystemVerification
 
 ## Runtime configuration
 
-The default container runtime in minikube is Docker. You can select it explicitly by using:
+The default container runtime in minikube is [containerd]({{<ref "/docs/runtimes/containerd">}}).
+
+Depending on specific factors like the driver you choose, there may be recommendations of a preferred container runtime, see [drivers page]({{<ref "/docs/drivers">}}) for details.
+
+You can select a container runtime explicitly, for example Docker:
 
 ```shell
 minikube start --container-runtime=docker
 ```
 
-Other options available are:
+The available options are:
 
-* [containerd](https://github.com/containerd/containerd)
-* [cri-o](https://github.com/cri-o/cri-o)
+* [containerd]({{<ref "/docs/runtimes/containerd">}})
+* [cri-o]({{<ref "/docs/runtimes/cri-o">}})
+* [docker]({{<ref "/docs/runtimes/docker">}})
+
+See <https://kubernetes.io/docs/setup/production-environment/container-runtimes/>
 
 ## Environment variables
 
@@ -110,28 +117,54 @@ For example the `minikube start --iso-url="$ISO_URL"` flag can also be set by se
 
 Some features can only be accessed by minikube specific environment variables, here is a list of these features:
 
-* **MINIKUBE_HOME** - (string) sets the path for the .minikube directory that minikube uses for state/configuration. *Please note: this is used only by minikube and does not affect anything related to Kubernetes tools such as kubectl.*
+* **MINIKUBE_HOME** - (string) sets the path for the .minikube directory that minikube uses for state/configuration. If you specify it to `/path/to/somewhere` and `somewhere` is not equal to `.minikube`, the final MINIKUBE_HOME will be `/path/to/somewhere/.minikube`. Defaults to `~/.minikube` if unspecified. *Please note: this is used only by minikube and does not affect anything related to Kubernetes tools such as kubectl.*
 
 * **MINIKUBE_IN_STYLE** - (bool) manually sets whether or not emoji and colors should appear in minikube. Set to false or 0 to disable this feature, true or 1 to force it to be turned on.
-
-* **MINIKUBE_WANTUPDATENOTIFICATION** - (bool) sets whether the user wants an update notification for new minikube versions
-
-* **MINIKUBE_REMINDERWAITPERIODINHOURS** - (int) sets the number of hours to check for an update notification
 
 * **CHANGE_MINIKUBE_NONE_USER** - (bool) automatically change ownership of ~/.minikube to the value of $SUDO_USER
 
 * **MINIKUBE_ENABLE_PROFILING** - (int, `1` enables it) enables trace profiling to be generated for minikube
 
+* **MINIKUBE_SUPPRESS_DOCKER_PERFORMANCE** - (bool) suppresses Docker performance warnings when Docker is slow
+
 ### Example: Disabling emoji
+
+{{% tabs %}}
+
+{{% linuxtab %}}
 
 ```shell
 export MINIKUBE_IN_STYLE=false
 minikube start
 ```
 
+{{% /linuxtab %}}
+
+{{% mactab %}}
+
+```shell
+export MINIKUBE_IN_STYLE=false
+minikube start
+```
+
+{{% /mactab %}}
+
+{{% windowstab %}}
+
+```shell
+$env:MINIKUBE_IN_STYLE=false
+minikube start
+```
+
+{{% /windowstab %}}
+{{% /tabs %}}
+
 ### Making environment values persistent
 
 To make the exported variables persistent across reboots:
 
 * Linux and macOS: Add these declarations to `~/.bashrc` or wherever your shells environment variables are stored.
-* Windows: Add these declarations via [system settings](https://support.microsoft.com/en-au/help/310519/how-to-manage-environment-variables-in-windows-xp) or using [setx](https://stackoverflow.com/questions/5898131/set-a-persistent-environment-variable-from-cmd-exe)
+* Windows: Either add these declarations to your `~\Documents\WindowsPowerShell\Microsoft.PowerShell_profile.ps1` or run the following in a PowerShell terminal:
+```shell
+[Environment]::SetEnvironmentVariable("key", "value", [EnvironmentVariableTarget]::User)
+```

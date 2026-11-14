@@ -18,17 +18,17 @@ package monitor
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"os"
 	"time"
 
-	"github.com/google/go-github/v36/github"
-	"github.com/pkg/errors"
+	"github.com/google/go-github/v85/github"
 	"golang.org/x/oauth2"
 )
 
 // Client provides the context and client with necessary auth
-// for interacting with the Github API
+// for interacting with the GitHub API
 type Client struct {
 	ctx context.Context
 	*github.Client
@@ -62,9 +62,9 @@ func (g *Client) CommentOnPR(pr int, message string) error {
 	}
 
 	log.Printf("Creating comment on PR %d: %s", pr, message)
-	_, _, err := g.Client.Issues.CreateComment(g.ctx, g.owner, g.repo, pr, comment)
+	_, _, err := g.Issues.CreateComment(g.ctx, g.owner, g.repo, pr, comment)
 	if err != nil {
-		return errors.Wrap(err, "creating github comment")
+		return fmt.Errorf("creating github comment: %w", err)
 	}
 	log.Printf("Successfully commented on PR %d.", pr)
 	return nil
@@ -73,9 +73,9 @@ func (g *Client) CommentOnPR(pr int, message string) error {
 // ListOpenPRsWithLabel returns all open PRs with the specified label
 func (g *Client) ListOpenPRsWithLabel(label string) ([]int, error) {
 	validPrs := []int{}
-	prs, _, err := g.Client.PullRequests.List(g.ctx, g.owner, g.repo, &github.PullRequestListOptions{})
+	prs, _, err := g.PullRequests.List(g.ctx, g.owner, g.repo, &github.PullRequestListOptions{})
 	if err != nil {
-		return nil, errors.Wrap(err, "listing pull requests")
+		return nil, fmt.Errorf("listing pull requests: %w", err)
 	}
 	for _, pr := range prs {
 		if prContainsLabel(pr.Labels, label) {
@@ -102,11 +102,11 @@ func prContainsLabel(labels []*github.Label, label string) bool {
 func (g *Client) NewCommitsExist(pr int, login string) (bool, error) {
 	lastCommentTime, err := g.timeOfLastComment(pr, login)
 	if err != nil {
-		return false, errors.Wrapf(err, "getting time of last comment by %s on pr %d", login, pr)
+		return false, fmt.Errorf("getting time of last comment by %s on pr %d: %w", login, pr, err)
 	}
 	lastCommitTime, err := g.timeOfLastCommit(pr)
 	if err != nil {
-		return false, errors.Wrapf(err, "getting time of last commit on pr %d", pr)
+		return false, fmt.Errorf("getting time of last commit on pr %d: %w", pr, err)
 	}
 	return lastCommentTime.Before(lastCommitTime), nil
 }
@@ -117,7 +117,7 @@ func (g *Client) timeOfLastCommit(pr int) (time.Time, error) {
 	page := 0
 	resultsPerPage := 30
 	for {
-		c, _, err := g.Client.PullRequests.ListCommits(g.ctx, g.owner, g.repo, pr, &github.ListOptions{
+		c, _, err := g.PullRequests.ListCommits(g.ctx, g.owner, g.repo, pr, &github.ListOptions{
 			Page:    page,
 			PerPage: resultsPerPage,
 		})
@@ -134,7 +134,7 @@ func (g *Client) timeOfLastCommit(pr int) (time.Time, error) {
 	lastCommitTime := time.Time{}
 	for _, c := range commits {
 		if newCommitTime := c.GetCommit().GetAuthor().GetDate(); newCommitTime.After(lastCommitTime) {
-			lastCommitTime = newCommitTime
+			lastCommitTime = *newCommitTime.GetTime()
 		}
 	}
 	return lastCommitTime, nil
@@ -146,7 +146,7 @@ func (g *Client) timeOfLastComment(pr int, login string) (time.Time, error) {
 	page := 0
 	resultsPerPage := 30
 	for {
-		c, _, err := g.Client.Issues.ListComments(g.ctx, g.owner, g.repo, pr, &github.IssueListCommentsOptions{
+		c, _, err := g.Issues.ListComments(g.ctx, g.owner, g.repo, pr, &github.IssueListCommentsOptions{
 			ListOptions: github.ListOptions{
 				Page:    page,
 				PerPage: resultsPerPage,
@@ -169,7 +169,8 @@ func (g *Client) timeOfLastComment(pr int, login string) (time.Time, error) {
 		if u := c.GetUser(); u != nil {
 			if u.GetLogin() == login {
 				if c.GetCreatedAt().After(lastCommentTime) {
-					lastCommentTime = c.GetCreatedAt()
+					createdAt := c.GetCreatedAt()
+					lastCommentTime = *createdAt.GetTime()
 				}
 			}
 		}

@@ -17,54 +17,98 @@ limitations under the License.
 package config
 
 import (
+	"encoding/json"
+	"fmt"
 	"os"
+	"strings"
 
 	"github.com/olekukonko/tablewriter"
+	"github.com/olekukonko/tablewriter/tw"
 	"github.com/spf13/cobra"
+	"k8s.io/klog/v2"
 	"k8s.io/minikube/pkg/minikube/assets"
 	"k8s.io/minikube/pkg/minikube/exit"
 	"k8s.io/minikube/pkg/minikube/out"
 	"k8s.io/minikube/pkg/minikube/reason"
 )
 
+var addonImagesOutput string
+
 var addonsImagesCmd = &cobra.Command{
 	Use:     "images ADDON_NAME",
 	Short:   "List image names the addon w/ADDON_NAME used. For a list of available addons use: minikube addons list",
 	Long:    "List image names the addon w/ADDON_NAME used. For a list of available addons use: minikube addons list",
 	Example: "minikube addons images ingress",
-	Run: func(cmd *cobra.Command, args []string) {
+	Run: func(_ *cobra.Command, args []string) {
 		if len(args) != 1 {
 			exit.Message(reason.Usage, "usage: minikube addons images ADDON_NAME")
 		}
 
 		addon := args[0]
-		// allows for additional prompting of information when enabling addons
-		if conf, ok := assets.Addons[addon]; ok {
-			if conf.Images != nil {
-				out.Infof("{{.name}} has following images:", out.V{"name": addon})
 
-				var tData [][]string
-				table := tablewriter.NewWriter(os.Stdout)
-				table.SetHeader([]string{"Image Name", "Default Image", "Default Registry"})
-				table.SetAutoFormatHeaders(true)
-				table.SetBorders(tablewriter.Border{Left: true, Top: true, Right: true, Bottom: true})
-				table.SetCenterSeparator("|")
-
-				for imageName, defaultImage := range conf.Images {
-					tData = append(tData, []string{imageName, defaultImage, conf.Registries[imageName]})
-				}
-
-				table.AppendBulk(tData)
-				table.Render()
-			} else {
-				out.Infof("{{.name}} doesn't have images.", out.V{"name": addon})
-			}
-		} else {
-			out.FailureT("No such addon {{.name}}", out.V{"name": addon})
+		switch strings.ToLower(addonImagesOutput) {
+		case "table":
+			printAddonImagesTable(addon)
+		case "json":
+			printAddonImagesJSON(addon)
+		default:
+			exit.Message(reason.Usage, fmt.Sprintf("invalid output format: %s. Valid values: 'table', 'json'", addonImagesOutput))
 		}
 	},
 }
 
+func printAddonImagesTable(addon string) {
+	// allows for additional prompting of information when enabling addons
+	if conf, ok := assets.Addons[addon]; ok {
+		if conf.Images != nil {
+			out.Infof("{{.name}} has the following images:", out.V{"name": addon})
+
+			var tData [][]string
+			table := tablewriter.NewWriter(os.Stdout)
+			table.Header([]string{"Image Name", "Default Image", "Default Registry"})
+			table.Header("Image Name", "Default Image", "Default Registry")
+			table.Options(
+				tablewriter.WithHeaderAutoFormat(tw.On),
+			)
+
+			for imageName, defaultImage := range conf.Images {
+				tData = append(tData, []string{imageName, defaultImage, conf.Registries[imageName]})
+			}
+
+			if err := table.Bulk(tData); err != nil {
+				klog.Error("Error rendering table (bulk)", err)
+			}
+			if err := table.Render(); err != nil {
+				klog.Error("Error rendering table", err)
+			}
+		} else {
+			out.Infof("{{.name}} doesn't have images.", out.V{"name": addon})
+		}
+	} else {
+		out.FailureT("No such addon {{.name}}", out.V{"name": addon})
+	}
+}
+
+func printAddonImagesJSON(addon string) {
+	if conf, ok := assets.Addons[addon]; ok {
+		if conf.Images != nil {
+			var data []string
+
+			for imageName, defaultImage := range conf.Images {
+				data = append(data, conf.Registries[imageName]+"/"+defaultImage)
+			}
+
+			jsonString, _ := json.Marshal(data)
+			out.String(string(jsonString))
+		} else {
+			out.String("[]")
+		}
+	} else {
+		out.FailureT("No such addon {{.name}}", out.V{"name": addon})
+	}
+}
+
 func init() {
+	addonsImagesCmd.Flags().StringVarP(&addonImagesOutput, "output", "o", "table", "minikube addons images ADDON_NAME --output OUTPUT. table, json")
 	AddonsCmd.AddCommand(addonsImagesCmd)
 }

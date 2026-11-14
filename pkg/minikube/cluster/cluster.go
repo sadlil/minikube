@@ -19,9 +19,8 @@ package cluster
 import (
 	"fmt"
 
-	"github.com/docker/machine/libmachine"
-	"github.com/docker/machine/libmachine/ssh"
-	"github.com/pkg/errors"
+	"k8s.io/minikube/pkg/libmachine"
+	"k8s.io/minikube/pkg/libmachine/ssh"
 
 	"k8s.io/minikube/pkg/minikube/bootstrapper"
 	"k8s.io/minikube/pkg/minikube/bootstrapper/kubeadm"
@@ -46,7 +45,7 @@ func Bootstrapper(api libmachine.API, bootstrapperName string, cc config.Cluster
 	case bootstrapper.Kubeadm:
 		b, err = kubeadm.NewBootstrapper(api, cc, r)
 		if err != nil {
-			return nil, errors.Wrap(err, "getting a new kubeadm bootstrapper")
+			return nil, fmt.Errorf("getting a new kubeadm bootstrapper: %w", err)
 		}
 	default:
 		return nil, fmt.Errorf("unknown bootstrapper: %s", bootstrapperName)
@@ -54,21 +53,21 @@ func Bootstrapper(api libmachine.API, bootstrapperName string, cc config.Cluster
 	return b, nil
 }
 
-// ControlPlaneBootstrapper returns the bootstrapper for the cluster's control plane
-func ControlPlaneBootstrapper(mAPI libmachine.API, cc *config.ClusterConfig, bootstrapperName string) (bootstrapper.Bootstrapper, command.Runner, error) {
-	cp, err := config.PrimaryControlPlane(cc)
+// ControlPlaneBootstrapper returns a bootstrapper for the first available cluster control-plane node.
+func ControlPlaneBootstrapper(mAPI libmachine.API, cc *config.ClusterConfig, bootstrapperName string) (bootstrapper.Bootstrapper, error) {
+	cp, err := config.ControlPlane(*cc)
 	if err != nil {
-		return nil, nil, errors.Wrap(err, "getting primary control plane")
+		return nil, fmt.Errorf("get primary control-plane node: %w", err)
 	}
 	h, err := machine.LoadHost(mAPI, config.MachineName(*cc, cp))
 	if err != nil {
-		return nil, nil, errors.Wrap(err, "getting control plane host")
+		return nil, fmt.Errorf("load primary control-plane host: %w", err)
 	}
 	cpr, err := machine.CommandRunner(h)
 	if err != nil {
-		return nil, nil, errors.Wrap(err, "getting control plane command runner")
+		return nil, fmt.Errorf("get primary control-plane command runner: %w", err)
 	}
 
 	bs, err := Bootstrapper(mAPI, bootstrapperName, *cc, cpr)
-	return bs, cpr, err
+	return bs, err
 }

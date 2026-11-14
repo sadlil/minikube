@@ -22,6 +22,7 @@ import (
 	"os"
 	"testing"
 
+	utilnet "k8s.io/apimachinery/pkg/util/net"
 	"k8s.io/client-go/rest"
 )
 
@@ -64,10 +65,7 @@ func TestIsInBlock(t *testing.T) {
 	for _, tc := range testCases {
 		t.Run(fmt.Sprintf("%s in %s Want: %t WantAErr: %t", tc.ip, tc.block, tc.want, tc.wanntAErr), func(t *testing.T) {
 			got, err := isInBlock(tc.ip, tc.block)
-			gotErr := false
-			if err != nil {
-				gotErr = true
-			}
+			gotErr := err != nil
 			if gotErr != tc.wanntAErr {
 				t.Errorf("isInBlock(%v,%v) got error is %v ; want error is %v", tc.ip, tc.block, gotErr, tc.wanntAErr)
 			}
@@ -134,17 +132,7 @@ func TestCheckEnv(t *testing.T) {
 	}
 	for _, tc := range testCases {
 		t.Run(fmt.Sprintf("%s in %s", tc.ip, tc.envName), func(t *testing.T) {
-			originalEnv := os.Getenv(tc.envName)
-			defer func() { // revert to pre-test env var
-				err := os.Setenv(tc.envName, originalEnv)
-				if err != nil {
-					t.Fatalf("Error reverting env (%s) to its original value (%s) var after test ", tc.envName, originalEnv)
-				}
-			}()
-
-			if err := os.Setenv(tc.envName, tc.mockEnvValue); err != nil {
-				t.Error("Error setting env var for taste case")
-			}
+			t.Setenv(tc.envName, tc.mockEnvValue)
 			if got := checkEnv(tc.ip, tc.envName); got != tc.want {
 				t.Errorf("CheckEnv(%v,%v) got  %v ; want is %v", tc.ip, tc.envName, got, tc.want)
 			}
@@ -166,17 +154,8 @@ func TestIsIPExcluded(t *testing.T) {
 		{"foo", "1.2.3.4", false},
 	}
 	for _, tc := range testCases {
-		originalEnv := os.Getenv("NO_PROXY")
-		defer func() { // revert to pre-test env var
-			err := os.Setenv("NO_PROXY", originalEnv)
-			if err != nil {
-				t.Fatalf("Error reverting env NO_PROXY to its original value (%s) var after test ", originalEnv)
-			}
-		}()
 		t.Run(fmt.Sprintf("exclude %s NO_PROXY(%v)", tc.ip, tc.env), func(t *testing.T) {
-			if err := os.Setenv("NO_PROXY", tc.env); err != nil {
-				t.Errorf("Error during setting env: %v", err)
-			}
+			t.Setenv("NO_PROXY", tc.env)
 			if excluded := IsIPExcluded(tc.ip); excluded != tc.excluded {
 				t.Fatalf("IsIPExcluded(%v) should return %v. NO_PROXY=%v", tc.ip, tc.excluded, tc.env)
 			}
@@ -196,18 +175,9 @@ func TestExcludeIP(t *testing.T) {
 		{"foo", "", true},
 		{"foo", "1.2.3.4", true},
 	}
-	originalEnv := os.Getenv("NO_PROXY")
-	defer func() { // revert to pre-test env var
-		err := os.Setenv("NO_PROXY", originalEnv)
-		if err != nil {
-			t.Fatalf("Error reverting env NO_PROXY to its original value (%s) var after test ", originalEnv)
-		}
-	}()
 	for _, tc := range testCases {
 		t.Run(fmt.Sprintf("exclude %s NO_PROXY(%s)", tc.ip, tc.env), func(t *testing.T) {
-			if err := os.Setenv("NO_PROXY", tc.env); err != nil {
-				t.Errorf("Error during setting env: %v", err)
-			}
+			t.Setenv("NO_PROXY", tc.env)
 			err := ExcludeIP(tc.ip)
 			if err != nil && !tc.wantAErr {
 				t.Errorf("ExcludeIP(%v) returned unexpected error %v", tc.ip, err)
@@ -219,15 +189,30 @@ func TestExcludeIP(t *testing.T) {
 	}
 }
 
+// fakeRoundTripperWrapper satisfies utilnet.RoundTripperWrapper for tests
+// that need to simulate the way client-go 0.36's *trackedTransport (or any
+// future wrapping layer) interposes between WrapTransport callers and the
+// underlying *http.Transport.
+type fakeRoundTripperWrapper struct{ rt http.RoundTripper }
+
+func (f *fakeRoundTripperWrapper) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f.rt.RoundTrip(req)
+}
+
+func (f *fakeRoundTripperWrapper) WrappedRoundTripper() http.RoundTripper { return f.rt }
+
+// Compile-time assertion: fakeRoundTripperWrapper must satisfy
+// utilnet.RoundTripperWrapper so the test exercises the same interface the
+// helper walks at runtime. Future client-go interface changes will surface
+// here as a build failure rather than a silently irrelevant test.
+var _ utilnet.RoundTripperWrapper = (*fakeRoundTripperWrapper)(nil)
+
 func TestUpdateTransport(t *testing.T) {
 	t.Run("new", func(t *testing.T) {
-		rc := rest.Config{}
-		c := UpdateTransport(&rc)
-		tr := &http.Transport{}
-		tr.RegisterProtocol("file", http.NewFileTransport(http.Dir("/tmp")))
-		rt := c.WrapTransport(tr)
-		if _, ok := rt.(http.RoundTripper); !ok {
-			t.Fatalf("Cannot cast rt(%v) to http.RoundTripper", rt)
+		rcBefore := rest.Config{}
+		rcAfter := UpdateTransport(&rcBefore)
+		if rcAfter.WrapTransport == nil {
+			t.Errorf("UpdateTransport(%v) = %v, WrapTransport was unexpectedly nil", rcBefore, rcAfter)
 		}
 	})
 	t.Run("existing", func(t *testing.T) {
@@ -257,4 +242,142 @@ func TestUpdateTransport(t *testing.T) {
 			t.Fatalf("Expected RoundTripper nil for invocation WrapTransport(nil)")
 		}
 	})
+	t.Run("wrapped", func(t *testing.T) {
+		inner := &http.Transport{Proxy: http.ProxyFromEnvironment}
+		wrapped := &fakeRoundTripperWrapper{rt: inner}
+
+		rc := rest.Config{}
+		c := UpdateTransport(&rc)
+		result := c.WrapTransport(wrapped)
+
+		if result != wrapped {
+			t.Fatalf("expected wrapper to be returned unchanged, got %T", result)
+		}
+		if inner.Proxy != nil {
+			t.Errorf("expected inner transport's Proxy to be nil, got non-nil")
+		}
+	})
+	t.Run("proxy-stripping", func(t *testing.T) {
+		inner := &http.Transport{Proxy: http.ProxyFromEnvironment}
+
+		rc := rest.Config{}
+		c := UpdateTransport(&rc)
+		result := c.WrapTransport(inner)
+
+		resultHT, ok := result.(*http.Transport)
+		if !ok {
+			t.Fatalf("expected *http.Transport from no-wrap path, got %T", result)
+		}
+		if resultHT.Proxy != nil {
+			t.Errorf("expected Proxy to be nil after UpdateTransport, got non-nil")
+		}
+	})
+}
+func TestMaskProxyPassword(t *testing.T) {
+	type dockerOptTest struct {
+		input  string
+		output string
+	}
+	var tests = []dockerOptTest{
+		{
+			input:  "cats",
+			output: "cats",
+		},
+		{
+			input:  "myDockerOption=value",
+			output: "myDockerOption=value",
+		},
+		{
+			input:  "http://minikube.sigs.k8s.io",
+			output: "http://minikube.sigs.k8s.io",
+		},
+		{
+			input:  "http://jdoe@minikube.sigs.k8s.io:8080",
+			output: "http://jdoe@minikube.sigs.k8s.io:8080",
+		},
+		{
+			input:  "https://mary:iam$Fake!password@minikube.sigs.k8s.io:8080",
+			output: "https://mary:*****@minikube.sigs.k8s.io:8080",
+		},
+		{
+			input:  "http://jdoe:%n0tRe@al:Password!@minikube.sigs.k8s.io:8080",
+			output: "http://jdoe:*****@minikube.sigs.k8s.io:8080",
+		},
+		{
+			input:  "http://jo@han:n0tRe@al:&Password!@minikube.sigs.k8s.io:8080",
+			output: "http://jo@han:*****@minikube.sigs.k8s.io:8080",
+		},
+		{
+			input:  "http://k@r3n!:an0th3erF@akeP@55word@minikube.sigs.k8s.io",
+			output: "http://k@r3n!:*****@minikube.sigs.k8s.io",
+		},
+		{
+			input:  "https://fr@ank5t3in:an0th3erF@akeP@55word@minikube.sigs.k8s.io",
+			output: "https://fr@ank5t3in:*****@minikube.sigs.k8s.io",
+		}, {
+			input:  "http://aaa:bbb@internet-app.corp.abcd:8080",
+			output: "http://aaa:*****@internet-app.corp.abcd:8080",
+		},
+		{
+			input:  "https://aaa:bbb@internet-app.corp.abcd:8080",
+			output: "https://aaa:*****@internet-app.corp.abcd:8080",
+		},
+	}
+	for _, test := range tests {
+		got := MaskProxyPassword(test.input)
+		if got != test.output {
+			t.Errorf("MaskProxyPassword(\"%v\"): got %v, expected %v", test.input, got, test.output)
+		}
+	}
+}
+
+func TestMaskProxyPasswordWithKey(t *testing.T) {
+	type dockerOptTest struct {
+		input  string
+		output string
+	}
+	var tests = []dockerOptTest{
+		{
+			input:  "cats",
+			output: "cats",
+		},
+		{
+			input:  "myDockerOption=value",
+			output: "myDockerOption=value",
+		},
+		{
+			input:  "http_proxy=http://minikube.sigs.k8s.io",
+			output: "HTTP_PROXY=http://minikube.sigs.k8s.io",
+		},
+		{
+			input:  "https_proxy=http://jdoe@minikube.sigs.k8s.io:8080",
+			output: "HTTPS_PROXY=http://jdoe@minikube.sigs.k8s.io:8080",
+		},
+		{
+			input:  "https_proxy=https://mary:iam$Fake!password@minikube.sigs.k8s.io:8080",
+			output: "HTTPS_PROXY=https://mary:*****@minikube.sigs.k8s.io:8080",
+		},
+		{
+			input:  "http_proxy=http://jdoe:%n0tRe@al:Password!@minikube.sigs.k8s.io:8080",
+			output: "HTTP_PROXY=http://jdoe:*****@minikube.sigs.k8s.io:8080",
+		},
+		{
+			input:  "http_proxy=http://jo@han:n0tRe@al:&Password!@minikube.sigs.k8s.io:8080",
+			output: "HTTP_PROXY=http://jo@han:*****@minikube.sigs.k8s.io:8080",
+		},
+		{
+			input:  "http_proxy=http://k@r3n!:an0th3erF@akeP@55word@minikube.sigs.k8s.io",
+			output: "HTTP_PROXY=http://k@r3n!:*****@minikube.sigs.k8s.io",
+		},
+		{
+			input:  "https_proxy=https://fr@ank5t3in:an0th3erF@akeP@55word@minikube.sigs.k8s.io",
+			output: "HTTPS_PROXY=https://fr@ank5t3in:*****@minikube.sigs.k8s.io",
+		},
+	}
+	for _, test := range tests {
+		got := MaskProxyPasswordWithKey(test.input)
+		if got != test.output {
+			t.Errorf("MaskProxyPasswordWithKey(\"%v\"): got %v, expected %v", test.input, got, test.output)
+		}
+	}
 }

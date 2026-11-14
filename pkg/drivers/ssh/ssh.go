@@ -18,24 +18,23 @@ package ssh
 
 import (
 	"fmt"
-	"io/ioutil"
 	"net"
 	"os"
 	"os/exec"
 	"path"
 	"strconv"
+	"strings"
 	"time"
 
 	"golang.org/x/crypto/ssh"
 
-	"github.com/docker/machine/libmachine/drivers"
-	"github.com/docker/machine/libmachine/engine"
-	"github.com/docker/machine/libmachine/log"
-	"github.com/docker/machine/libmachine/mcnutils"
-	"github.com/docker/machine/libmachine/state"
-	"github.com/pkg/errors"
 	"k8s.io/klog/v2"
-	pkgdrivers "k8s.io/minikube/pkg/drivers"
+	"k8s.io/minikube/pkg/drivers/common"
+	"k8s.io/minikube/pkg/libmachine/drivers"
+	"k8s.io/minikube/pkg/libmachine/engine"
+	"k8s.io/minikube/pkg/libmachine/log"
+	"k8s.io/minikube/pkg/libmachine/mcnutils"
+	"k8s.io/minikube/pkg/libmachine/state"
 	"k8s.io/minikube/pkg/minikube/command"
 	"k8s.io/minikube/pkg/minikube/cruntime"
 	"k8s.io/minikube/pkg/minikube/sysinit"
@@ -45,7 +44,7 @@ import (
 // https://minikube.sigs.k8s.io/docs/reference/drivers/ssh/
 type Driver struct {
 	*drivers.BaseDriver
-	*pkgdrivers.CommonDriver
+	*common.CommonDriver
 	EnginePort int
 	SSHKey     string
 	runtime    cruntime.Manager
@@ -110,14 +109,14 @@ func (d *Driver) PreCreateCheck() error {
 			return fmt.Errorf("SSH key does not exist: %q", d.SSHKey)
 		}
 
-		key, err := ioutil.ReadFile(d.SSHKey)
+		key, err := os.ReadFile(d.SSHKey)
 		if err != nil {
 			return err
 		}
 
 		_, err = ssh.ParsePrivateKey(key)
 		if err != nil {
-			return errors.Wrapf(err, "SSH key does not parse: %q", d.SSHKey)
+			return fmt.Errorf("SSH key does not parse: %q: %w", d.SSHKey, err)
 		}
 	}
 
@@ -142,8 +141,14 @@ func (d *Driver) Create() error {
 	}
 
 	if d.runtime.Name() == "Docker" {
-		if _, err := d.exec.RunCmd(exec.Command("sudo", "usermod", "-aG", "docker", d.GetSSHUsername())); err != nil {
-			return errors.Wrap(err, "usermod")
+		groups, err := d.exec.RunCmd(exec.Command("groups", d.GetSSHUsername()))
+		if err != nil {
+			return fmt.Errorf("groups: %w", err)
+		}
+		if !strings.Contains(groups.Stdout.String(), "docker") {
+			if _, err := d.exec.RunCmd(exec.Command("sudo", "usermod", "-aG", "docker", d.GetSSHUsername())); err != nil {
+				return fmt.Errorf("usermod: %w", err)
+			}
 		}
 	}
 
@@ -193,11 +198,11 @@ func (d *Driver) Stop() error {
 	}
 	containers, err := d.runtime.ListContainers(cruntime.ListContainersOptions{})
 	if err != nil {
-		return errors.Wrap(err, "containers")
+		return fmt.Errorf("containers: %w", err)
 	}
 	if len(containers) > 0 {
 		if err := d.runtime.StopContainers(containers); err != nil {
-			return errors.Wrap(err, "stop containers")
+			return fmt.Errorf("stop containers: %w", err)
 		}
 	}
 	klog.Infof("ssh driver is stopped!")
@@ -206,10 +211,7 @@ func (d *Driver) Stop() error {
 
 // Restart a host
 func (d *Driver) Restart() error {
-	if err := sysinit.New(d.exec).Restart("kubelet"); err != nil {
-		return err
-	}
-	return nil
+	return sysinit.New(d.exec).Restart("kubelet")
 }
 
 // Kill stops a host forcefully, including any containers that we are managing.
@@ -221,25 +223,25 @@ func (d *Driver) Kill() error {
 	// First try to gracefully stop containers
 	containers, err := d.runtime.ListContainers(cruntime.ListContainersOptions{})
 	if err != nil {
-		return errors.Wrap(err, "containers")
+		return fmt.Errorf("containers: %w", err)
 	}
 	if len(containers) == 0 {
 		return nil
 	}
 	// Try to be graceful before sending SIGKILL everywhere.
 	if err := d.runtime.StopContainers(containers); err != nil {
-		return errors.Wrap(err, "stop")
+		return fmt.Errorf("stop: %w", err)
 	}
 
 	containers, err = d.runtime.ListContainers(cruntime.ListContainersOptions{})
 	if err != nil {
-		return errors.Wrap(err, "containers")
+		return fmt.Errorf("containers: %w", err)
 	}
 	if len(containers) == 0 {
 		return nil
 	}
 	if err := d.runtime.KillContainers(containers); err != nil {
-		return errors.Wrap(err, "kill")
+		return fmt.Errorf("kill: %w", err)
 	}
 	return nil
 }

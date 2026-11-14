@@ -97,8 +97,7 @@ func TestAssetsFromDir(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.description, func(t *testing.T) {
-			testDir := testutil.MakeTempDir()
-			defer testutil.RemoveTempDir(testDir)
+			testDir := testutil.MakeTempDir(t)
 
 			testDirs = append(testDirs, testDir)
 			testFileBaseDir := filepath.Join(testDir, test.baseDir)
@@ -137,6 +136,12 @@ func TestAssetsFromDir(t *testing.T) {
 			got := make(map[string]string)
 			for _, actualFile := range actualFiles {
 				got[actualFile.GetSourcePath()] = actualFile.GetTargetDir()
+			}
+			// close any open file handles returned by assetsFromDir so Windows can clean up the temp dir
+			for _, actualFile := range actualFiles {
+				if c, ok := actualFile.(interface{ Close() error }); ok {
+					_ = c.Close()
+				}
 			}
 			if diff := cmp.Diff(want, got); diff != "" {
 				t.Errorf("files differ: (-want +got)\n%s", diff)

@@ -18,16 +18,16 @@ package machine
 
 import (
 	"errors"
-	"io/ioutil"
+	"os"
 	"os/exec"
 	"strconv"
 	"strings"
 
-	"github.com/docker/machine/libmachine/provision"
-	"github.com/shirou/gopsutil/v3/cpu"
-	"github.com/shirou/gopsutil/v3/disk"
-	"github.com/shirou/gopsutil/v3/mem"
+	"github.com/shirou/gopsutil/v4/cpu"
+	"github.com/shirou/gopsutil/v4/disk"
+	"github.com/shirou/gopsutil/v4/mem"
 	"k8s.io/klog/v2"
+	"k8s.io/minikube/pkg/libmachine/provision"
 	"k8s.io/minikube/pkg/minikube/command"
 	"k8s.io/minikube/pkg/minikube/out"
 	"k8s.io/minikube/pkg/minikube/out/register"
@@ -105,7 +105,7 @@ func RemoteHostInfo(r command.Runner) (*HostInfo, error, error, error) {
 
 // showLocalOsRelease shows systemd information about the current linux distribution, on the local host
 func showLocalOsRelease() {
-	osReleaseOut, err := ioutil.ReadFile("/etc/os-release")
+	osReleaseOut, err := os.ReadFile("/etc/os-release")
 	if err != nil {
 		klog.Errorf("ReadFile: %v", err)
 		return
@@ -142,7 +142,7 @@ var (
 	cachedSystemMemoryErr   *error
 )
 
-//  cachedSysMemLimit will return a cached limit for the system's virtual memory.
+// cachedSysMemLimit will return a cached limit for the system's virtual memory.
 func cachedSysMemLimit() (*mem.VirtualMemoryStat, error) {
 	if cachedSystemMemoryLimit == nil {
 		v, err := mem.VirtualMemory()
@@ -178,7 +178,7 @@ var (
 	cachedCPUErr *error
 )
 
-//  cachedCPUInfo will return a cached cpu info
+// cachedCPUInfo will return a cached cpu info
 func cachedCPUInfo() ([]cpu.InfoStat, error) {
 	if cachedCPU == nil {
 		// one InfoStat per thread
@@ -193,11 +193,11 @@ func cachedCPUInfo() ([]cpu.InfoStat, error) {
 }
 
 // ParseMemFree parses the output of the `free -m` command
-func parseMemFree(out string) (int64, error) {
+func parseMemFree(s string) (int64, error) {
 	//             total        used        free      shared  buff/cache   available
 	//Mem:           1987         706         194           1        1086        1173
 	//Swap:             0           0           0
-	outlines := strings.Split(out, "\n")
+	outlines := strings.Split(s, "\n")
 	l := len(outlines)
 	for _, line := range outlines[1 : l-1] {
 		parsedLine := strings.Fields(line)
@@ -217,10 +217,10 @@ func parseMemFree(out string) (int64, error) {
 }
 
 // ParseDiskFree parses the output of the `df -m` command
-func parseDiskFree(out string) (int64, error) {
+func parseDiskFree(s string) (int64, error) {
 	// Filesystem     1M-blocks  Used Available Use% Mounted on
 	// /dev/sda1          39643  3705     35922  10% /
-	outlines := strings.Split(out, "\n")
+	outlines := strings.Split(s, "\n")
 	l := len(outlines)
 	for _, line := range outlines[1 : l-1] {
 		parsedLine := strings.Fields(line)

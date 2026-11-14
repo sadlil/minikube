@@ -7,14 +7,14 @@ package docker
 import (
 	"fmt"
 	"io"
-	"io/ioutil"
 	"os"
 	"path"
 	"path/filepath"
 	"strings"
 
-	"github.com/docker/docker/pkg/archive"
-	"github.com/docker/docker/pkg/fileutils"
+	"github.com/moby/go-archive"
+	"github.com/moby/go-archive/compression"
+	"github.com/moby/patternmatcher"
 )
 
 func CreateTarStream(srcPath, dockerfilePath string) (io.ReadCloser, error) {
@@ -34,7 +34,7 @@ func CreateTarStream(srcPath, dockerfilePath string) (io.ReadCloser, error) {
 	// then make sure we send both files over to the daemon
 	// because Dockerfile is, obviously, needed no matter what, and
 	// .dockerignore is needed to know if either one needs to be
-	// removed.  The deamon will remove them for us, if needed, after it
+	// removed.  The daemon will remove them for us, if needed, after it
 	// parses the Dockerfile.
 	//
 	// https://github.com/docker/docker/issues/8330
@@ -45,7 +45,7 @@ func CreateTarStream(srcPath, dockerfilePath string) (io.ReadCloser, error) {
 		if includeFile == "" {
 			continue
 		}
-		keepThem, err := fileutils.Matches(includeFile, excludes)
+		keepThem, err := patternmatcher.Matches(includeFile, excludes)
 		if err != nil {
 			return nil, fmt.Errorf("cannot match .dockerfileignore: '%s', error: %w", includeFile, err)
 		}
@@ -60,7 +60,7 @@ func CreateTarStream(srcPath, dockerfilePath string) (io.ReadCloser, error) {
 	tarOpts := &archive.TarOptions{
 		ExcludePatterns: excludes,
 		IncludeFiles:    includes,
-		Compression:     archive.Uncompressed,
+		Compression:     compression.None,
 		NoLchown:        true,
 	}
 	return archive.TarWithOptions(srcPath, tarOpts)
@@ -74,7 +74,7 @@ func validateContextDirectory(srcPath string, excludes []string) error {
 		// skip this directory/file if it's not in the path, it won't get added to the context
 		if relFilePath, relErr := filepath.Rel(srcPath, filePath); relErr != nil {
 			return relErr
-		} else if skip, matchErr := fileutils.Matches(relFilePath, excludes); matchErr != nil {
+		} else if skip, matchErr := patternmatcher.Matches(relFilePath, excludes); matchErr != nil {
 			return matchErr
 		} else if skip {
 			if f.IsDir() {
@@ -112,7 +112,7 @@ func validateContextDirectory(srcPath string, excludes []string) error {
 
 func parseDockerignore(root string) ([]string, error) {
 	var excludes []string
-	ignore, err := ioutil.ReadFile(path.Join(root, ".dockerignore"))
+	ignore, err := os.ReadFile(path.Join(root, ".dockerignore"))
 	if err != nil && !os.IsNotExist(err) {
 		return excludes, fmt.Errorf("error reading .dockerignore: %w", err)
 	}

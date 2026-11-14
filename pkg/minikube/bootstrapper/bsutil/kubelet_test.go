@@ -18,9 +18,10 @@ limitations under the License.
 package bsutil
 
 import (
+	"fmt"
 	"testing"
 
-	"github.com/pmezard/go-difflib/difflib"
+	"github.com/google/go-cmp/cmp"
 	"k8s.io/minikube/pkg/minikube/config"
 	"k8s.io/minikube/pkg/minikube/constants"
 	"k8s.io/minikube/pkg/minikube/cruntime"
@@ -36,7 +37,8 @@ func TestGenerateKubeletConfig(t *testing.T) {
 		{
 			description: "old docker",
 			cfg: config.ClusterConfig{
-				Name: "minikube",
+				Name:   "minikube",
+				Driver: "docker",
 				KubernetesConfig: config.KubernetesConfig{
 					KubernetesVersion: constants.OldestKubernetesVersion,
 					ContainerRuntime:  "docker",
@@ -54,7 +56,7 @@ Wants=docker.socket
 
 [Service]
 ExecStart=
-ExecStart=/var/lib/minikube/binaries/v1.12.0/kubelet --allow-privileged=true --authorization-mode=Webhook --bootstrap-kubeconfig=/etc/kubernetes/bootstrap-kubelet.conf --cadvisor-port=0 --cgroup-driver=cgroupfs --client-ca-file=/var/lib/minikube/certs/ca.crt --cluster-domain=cluster.local --config=/var/lib/kubelet/config.yaml --container-runtime=docker --fail-swap-on=false --hostname-override=minikube --kubeconfig=/etc/kubernetes/kubelet.conf --node-ip=192.168.1.100 --pod-manifest-path=/etc/kubernetes/manifests
+ExecStart=/var/lib/minikube/binaries/%s/kubelet --bootstrap-kubeconfig=/etc/kubernetes/bootstrap-kubelet.conf --config=/var/lib/kubelet/config.yaml --container-runtime=docker --hostname-override=minikube --kubeconfig=/etc/kubernetes/kubelet.conf --node-ip=192.168.1.100 --provider-id=minikube://docker/docker/minikube/minikube
 
 [Install]
 `,
@@ -62,7 +64,8 @@ ExecStart=/var/lib/minikube/binaries/v1.12.0/kubelet --allow-privileged=true --a
 		{
 			description: "newest cri runtime",
 			cfg: config.ClusterConfig{
-				Name: "minikube",
+				Name:   "minikube",
+				Driver: "podman",
 				KubernetesConfig: config.KubernetesConfig{
 					KubernetesVersion: constants.NewestKubernetesVersion,
 					ContainerRuntime:  "cri-o",
@@ -80,7 +83,7 @@ Wants=crio.service
 
 [Service]
 ExecStart=
-ExecStart=/var/lib/minikube/binaries/v1.18.2/kubelet --authorization-mode=Webhook --bootstrap-kubeconfig=/etc/kubernetes/bootstrap-kubelet.conf --cgroup-driver=cgroupfs --client-ca-file=/var/lib/minikube/certs/ca.crt --cluster-domain=cluster.local --config=/var/lib/kubelet/config.yaml --container-runtime=remote --container-runtime-endpoint=/var/run/crio/crio.sock --fail-swap-on=false --hostname-override=minikube --image-service-endpoint=/var/run/crio/crio.sock --kubeconfig=/etc/kubernetes/kubelet.conf --node-ip=192.168.1.100 --pod-manifest-path=/etc/kubernetes/manifests --runtime-request-timeout=15m
+ExecStart=/var/lib/minikube/binaries/%s/kubelet --bootstrap-kubeconfig=/etc/kubernetes/bootstrap-kubelet.conf --config=/var/lib/kubelet/config.yaml --container-runtime=remote --hostname-override=minikube --kubeconfig=/etc/kubernetes/kubelet.conf --node-ip=192.168.1.100 --provider-id=minikube://podman/cri-o/minikube/minikube
 
 [Install]
 `,
@@ -88,7 +91,8 @@ ExecStart=/var/lib/minikube/binaries/v1.18.2/kubelet --authorization-mode=Webhoo
 		{
 			description: "default containerd runtime",
 			cfg: config.ClusterConfig{
-				Name: "minikube",
+				Name:   "minikube",
+				Driver: "docker",
 				KubernetesConfig: config.KubernetesConfig{
 					KubernetesVersion: constants.DefaultKubernetesVersion,
 					ContainerRuntime:  "containerd",
@@ -106,7 +110,7 @@ Wants=containerd.service
 
 [Service]
 ExecStart=
-ExecStart=/var/lib/minikube/binaries/v1.18.2/kubelet --authorization-mode=Webhook --bootstrap-kubeconfig=/etc/kubernetes/bootstrap-kubelet.conf --cgroup-driver=cgroupfs --client-ca-file=/var/lib/minikube/certs/ca.crt --cluster-domain=cluster.local --config=/var/lib/kubelet/config.yaml --container-runtime=remote --container-runtime-endpoint=unix:///run/containerd/containerd.sock --fail-swap-on=false --hostname-override=minikube --image-service-endpoint=unix:///run/containerd/containerd.sock --kubeconfig=/etc/kubernetes/kubelet.conf --node-ip=192.168.1.100 --pod-manifest-path=/etc/kubernetes/manifests --runtime-request-timeout=15m
+ExecStart=/var/lib/minikube/binaries/%s/kubelet --bootstrap-kubeconfig=/etc/kubernetes/bootstrap-kubelet.conf --config=/var/lib/kubelet/config.yaml --container-runtime=remote --hostname-override=minikube --kubeconfig=/etc/kubernetes/kubelet.conf --node-ip=192.168.1.100 --provider-id=minikube://docker/containerd/minikube/minikube
 
 [Install]
 `,
@@ -114,7 +118,8 @@ ExecStart=/var/lib/minikube/binaries/v1.18.2/kubelet --authorization-mode=Webhoo
 		{
 			description: "default containerd runtime with IP override",
 			cfg: config.ClusterConfig{
-				Name: "minikube",
+				Name:   "minikube",
+				Driver: "kvm2",
 				KubernetesConfig: config.KubernetesConfig{
 					KubernetesVersion: constants.DefaultKubernetesVersion,
 					ContainerRuntime:  "containerd",
@@ -139,7 +144,7 @@ Wants=containerd.service
 
 [Service]
 ExecStart=
-ExecStart=/var/lib/minikube/binaries/v1.18.2/kubelet --authorization-mode=Webhook --bootstrap-kubeconfig=/etc/kubernetes/bootstrap-kubelet.conf --cgroup-driver=cgroupfs --client-ca-file=/var/lib/minikube/certs/ca.crt --cluster-domain=cluster.local --config=/var/lib/kubelet/config.yaml --container-runtime=remote --container-runtime-endpoint=unix:///run/containerd/containerd.sock --fail-swap-on=false --hostname-override=minikube --image-service-endpoint=unix:///run/containerd/containerd.sock --kubeconfig=/etc/kubernetes/kubelet.conf --node-ip=192.168.1.200 --pod-manifest-path=/etc/kubernetes/manifests --runtime-request-timeout=15m
+ExecStart=/var/lib/minikube/binaries/%s/kubelet --bootstrap-kubeconfig=/etc/kubernetes/bootstrap-kubelet.conf --config=/var/lib/kubelet/config.yaml --container-runtime=remote --hostname-override=minikube --kubeconfig=/etc/kubernetes/kubelet.conf --node-ip=192.168.1.200 --provider-id=minikube://kvm2/containerd/minikube/minikube
 
 [Install]
 `,
@@ -147,7 +152,8 @@ ExecStart=/var/lib/minikube/binaries/v1.18.2/kubelet --authorization-mode=Webhoo
 		{
 			description: "docker with custom image repository",
 			cfg: config.ClusterConfig{
-				Name: "minikube",
+				Name:   "minikube",
+				Driver: "docker",
 				KubernetesConfig: config.KubernetesConfig{
 					KubernetesVersion: constants.DefaultKubernetesVersion,
 					ContainerRuntime:  "docker",
@@ -166,7 +172,66 @@ Wants=docker.socket
 
 [Service]
 ExecStart=
-ExecStart=/var/lib/minikube/binaries/v1.18.2/kubelet --authorization-mode=Webhook --bootstrap-kubeconfig=/etc/kubernetes/bootstrap-kubelet.conf --cgroup-driver=cgroupfs --client-ca-file=/var/lib/minikube/certs/ca.crt --cluster-domain=cluster.local --config=/var/lib/kubelet/config.yaml --container-runtime=docker --fail-swap-on=false --hostname-override=minikube --kubeconfig=/etc/kubernetes/kubelet.conf --node-ip=192.168.1.100 --pod-infra-container-image=docker-proxy-image.io/google_containers/pause:3.2 --pod-manifest-path=/etc/kubernetes/manifests
+ExecStart=/var/lib/minikube/binaries/%s/kubelet --bootstrap-kubeconfig=/etc/kubernetes/bootstrap-kubelet.conf --config=/var/lib/kubelet/config.yaml --container-runtime=docker --hostname-override=minikube --kubeconfig=/etc/kubernetes/kubelet.conf --node-ip=192.168.1.100 --provider-id=minikube://docker/docker/minikube/minikube
+
+[Install]
+`,
+		},
+		{
+			description: "non-default profile name",
+			cfg: config.ClusterConfig{
+				Name:   "p1",
+				Driver: "kvm2",
+				KubernetesConfig: config.KubernetesConfig{
+					KubernetesVersion: constants.DefaultKubernetesVersion,
+					ContainerRuntime:  "containerd",
+				},
+				Nodes: []config.Node{
+					{
+						IP:           "192.168.1.100",
+						ControlPlane: true,
+					},
+				},
+			},
+			expected: `[Unit]
+Wants=containerd.service
+
+[Service]
+ExecStart=
+ExecStart=/var/lib/minikube/binaries/%s/kubelet --bootstrap-kubeconfig=/etc/kubernetes/bootstrap-kubelet.conf --config=/var/lib/kubelet/config.yaml --container-runtime=remote --hostname-override=p1 --kubeconfig=/etc/kubernetes/kubelet.conf --node-ip=192.168.1.100 --provider-id=minikube://kvm2/containerd/p1/p1
+
+[Install]
+`,
+		},
+		{
+			description: "provider ID override",
+			cfg: config.ClusterConfig{
+				Name:   "p1",
+				Driver: "kvm2",
+				KubernetesConfig: config.KubernetesConfig{
+					KubernetesVersion: constants.DefaultKubernetesVersion,
+					ContainerRuntime:  "containerd",
+					ExtraOptions: config.ExtraOptionSlice{
+						config.ExtraOption{
+							Component: Kubelet,
+							Key:       "provider-id",
+							Value:     "custom://node",
+						},
+					},
+				},
+				Nodes: []config.Node{
+					{
+						IP:           "192.168.1.100",
+						ControlPlane: true,
+					},
+				},
+			},
+			expected: `[Unit]
+Wants=containerd.service
+
+[Service]
+ExecStart=
+ExecStart=/var/lib/minikube/binaries/%s/kubelet --bootstrap-kubeconfig=/etc/kubernetes/bootstrap-kubelet.conf --config=/var/lib/kubelet/config.yaml --container-runtime=remote --hostname-override=p1 --kubeconfig=/etc/kubernetes/kubelet.conf --node-ip=192.168.1.100 --provider-id=custom://node
 
 [Install]
 `,
@@ -190,15 +255,10 @@ ExecStart=/var/lib/minikube/binaries/v1.18.2/kubelet --authorization-mode=Webhoo
 				return
 			}
 
-			diff, err := difflib.GetUnifiedDiffString(difflib.UnifiedDiff{
-				A:        difflib.SplitLines(tc.expected),
-				B:        difflib.SplitLines(string(got)),
-				FromFile: "Expected",
-				ToFile:   "Got",
-				Context:  1,
-			})
-			if err != nil {
-				t.Fatalf("diff error: %v\n%s", err, diff)
+			expected := fmt.Sprintf(tc.expected, tc.cfg.KubernetesConfig.KubernetesVersion)
+
+			if diff := cmp.Diff(expected, string(got)); diff != "" {
+				t.Errorf("GenerateKubeletConfig mismatch (-want +got):\n%s", diff)
 			}
 		})
 	}

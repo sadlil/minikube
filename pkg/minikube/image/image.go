@@ -19,24 +19,28 @@ package image
 import (
 	"context"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"time"
 
-	"github.com/docker/docker/client"
+	cerrdefs "github.com/containerd/errdefs"
 	"github.com/google/go-containerregistry/pkg/authn"
 	"github.com/google/go-containerregistry/pkg/name"
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 	"github.com/google/go-containerregistry/pkg/v1/daemon"
 	"github.com/google/go-containerregistry/pkg/v1/mutate"
 	"github.com/google/go-containerregistry/pkg/v1/remote"
+	"github.com/google/go-containerregistry/pkg/v1/tarball"
+	"github.com/moby/moby/client"
 
-	"github.com/pkg/errors"
+	"errors"
+
 	"k8s.io/klog/v2"
-	"k8s.io/minikube/pkg/minikube/constants"
+	"k8s.io/minikube/pkg/minikube/detect"
+	"k8s.io/minikube/pkg/minikube/localpath"
 )
 
 const (
@@ -69,10 +73,11 @@ func UseRemote(use bool) {
 func DigestByDockerLib(imgClient *client.Client, imgName string) string {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second*10)
 	defer cancel()
-	imgClient.NegotiateAPIVersion(ctx)
-	img, _, err := imgClient.ImageInspectWithRaw(ctx, imgName)
-	if err != nil && !client.IsErrNotFound(err) {
-		klog.Infof("couldn't find image digest %s from local daemon: %v ", imgName, err)
+	img, err := imgClient.ImageInspect(ctx, imgName)
+	if err != nil {
+		if !cerrdefs.IsNotFound(err) {
+			klog.Infof("couldn't find image digest %s from local daemon: %v ", imgName, err)
+		}
 		return ""
 	}
 	return img.ID
@@ -101,16 +106,22 @@ func DigestByGoLib(imgName string) string {
 	return cf.Hex
 }
 
-// Tag returns just the image with the tag
-// eg image:tag@sha256:digest -> image:tag if there is an associated tag
-// if not possible, just return the initial img
+// Tag returns the image ref with any digest stripped
+//
+//	image:tag@sha256:digest	-> image:tag
+//	image@sha256:digest	-> image
+//	localhost:5000/myimage:v1@sha256:digest	-> localhost:5000/myimage:v1
+//
+// refs without a digest are returned unchanged:
+//
+//	image:tag -> image:tag
+//	image	-> image
 func Tag(img string) string {
-	split := strings.Split(img, ":")
-	if len(split) == 3 {
-		tag := strings.Split(split[1], "@")[0]
-		return fmt.Sprintf("%s:%s", split[0], tag)
+	at := strings.LastIndex(img, "@")
+	if at == -1 {
+		return img
 	}
-	return img
+	return img[:at]
 }
 
 func canonicalName(ref name.Reference) string {
@@ -127,7 +138,7 @@ func retrieveImage(ref name.Reference, imgName string) (v1.Image, string, error)
 	var img v1.Image
 
 	if !useDaemon && !useRemote {
-		return nil, "", fmt.Errorf("neither daemon nor remote")
+		return nil, "", errors.New("neither daemon nor remote")
 	}
 
 	klog.Infof("retrieving image: %+v", ref)
@@ -153,11 +164,12 @@ func retrieveImage(ref name.Reference, imgName string) (v1.Image, string, error)
 		}
 	}
 	if useRemote {
+		cname := canonicalName(ref)
 		img, err = retrieveRemote(ref, defaultPlatform)
 		if err == nil {
 			img, err = fixPlatform(ref, img, defaultPlatform)
 			if err == nil {
-				return img, canonicalName(ref), nil
+				return img, cname, nil
 			}
 		}
 	}
@@ -191,6 +203,122 @@ func retrieveRemote(ref name.Reference, p v1.Platform) (v1.Image, error) {
 	return img, err
 }
 
+// imagePathInCache returns path in local cache directory
+func imagePathInCache(img string) string {
+	f := filepath.Join(detect.ImageCacheDir(), img)
+	f = localpath.SanitizeCacheDir(f)
+	return f
+}
+
+// UploadCachedImage uploads cached image
+func UploadCachedImage(imgName string) error {
+	tag, err := name.NewTag(imgName, name.WeakValidation)
+	if err != nil {
+		klog.Infof("error parsing image name %s tag %v ", imgName, err)
+		return err
+	}
+	if err := uploadImage(tag, imagePathInCache(imgName)); err != nil {
+		manifest, err := loadManifestWithRetry(imagePathInCache(imgName))
+		if err != nil || len(manifest) == 0 || len(manifest[0].RepoTags) == 0 {
+			return fmt.Errorf("failed to determine the image tag from tarball, err: %v", err)
+		}
+
+		tag, err = name.NewTag(manifest[0].RepoTags[0], name.WeakValidation)
+		if err != nil {
+			klog.Infof("error parsing image name: %s ", err.Error())
+			return err
+		}
+		return uploadImage(tag, imagePathInCache(imgName))
+	}
+	return nil
+}
+
+func uploadImage(tag name.Tag, p string) error {
+	var err error
+	var img v1.Image
+
+	if !useDaemon && !useRemote {
+		return errors.New("neither daemon nor remote")
+	}
+
+	img, err = imageFromPathWithRetry(p, tag)
+	if err != nil {
+		return err
+	}
+	ref := name.Reference(tag)
+
+	klog.Infof("uploading image: %+v from: %s", ref, p)
+	if useDaemon {
+		return uploadDaemon(tag, img)
+	}
+	if useRemote {
+		return uploadRemote(ref, img, defaultPlatform)
+	}
+	return nil
+}
+
+func uploadDaemon(tag name.Tag, img v1.Image) error {
+	resp, err := daemon.Write(tag, img)
+	if err != nil {
+		klog.Warningf("daemon load for %s: %v\n%s", tag, err, resp)
+	}
+	return err
+}
+
+func uploadRemote(ref name.Reference, img v1.Image, p v1.Platform) error {
+	err := remote.Write(ref, img, remote.WithAuthFromKeychain(authn.DefaultKeychain), remote.WithPlatform(p))
+	if err != nil {
+		klog.Warningf("remote push for %s: %v", ref, err)
+	}
+	return err
+}
+
+func imageFromPathWithRetry(path string, tag name.Tag) (v1.Image, error) {
+	var lastErr error
+	const maxAttempts = 3
+	for i := 0; i < maxAttempts; i++ {
+		if i > 0 {
+			time.Sleep(200 * time.Millisecond)
+		}
+		img, err := tarball.ImageFromPath(path, &tag)
+		if err == nil {
+			return img, nil
+		}
+		lastErr = fmt.Errorf("tarball: %w", err)
+		if !isRetryableEOF(err) {
+			return nil, lastErr
+		}
+		klog.Infof("retrying tarball read for %s due to EOF (%d/%d)", path, i+1, maxAttempts)
+	}
+	return nil, lastErr
+}
+
+func loadManifestWithRetry(path string) (tarball.Manifest, error) {
+	var lastErr error
+	const maxAttempts = 3
+	for i := 0; i < maxAttempts; i++ {
+		if i > 0 {
+			time.Sleep(200 * time.Millisecond)
+		}
+		manifest, err := tarball.LoadManifest(func() (io.ReadCloser, error) {
+			return os.Open(path)
+		})
+		if err == nil {
+			return manifest, nil
+		}
+		lastErr = err
+		if !isRetryableEOF(err) {
+			return nil, lastErr
+		}
+		klog.Infof("retrying manifest read for %s due to EOF (%d/%d)", path, i+1, maxAttempts)
+	}
+	return nil, lastErr
+}
+
+func isRetryableEOF(err error) bool {
+	return errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, io.EOF) || strings.Contains(err.Error(), "unexpected EOF")
+}
+
 // See https://github.com/kubernetes/minikube/issues/10402
 // check if downloaded image Architecture field matches the requested and fix it otherwise
 func fixPlatform(ref name.Reference, img v1.Image, p v1.Platform) (v1.Image, error) {
@@ -210,13 +338,13 @@ func fixPlatform(ref name.Reference, img v1.Image, p v1.Platform) (v1.Image, err
 	img, err = mutate.ConfigFile(img, cfg)
 	if err != nil {
 		klog.Warningf("failed to change config for %s: %v", ref, err)
-		return img, errors.Wrap(err, "failed to change image config")
+		return img, fmt.Errorf("failed to change image config: %w", err)
 	}
 	return img, nil
 }
 
 func cleanImageCacheDir() error {
-	err := filepath.Walk(constants.ImageCacheDir, func(path string, info os.FileInfo, err error) error {
+	err := filepath.Walk(localpath.MakeMiniPath("cache", "images"), func(path string, info os.FileInfo, err error) error {
 		// If error is not nil, it's because the path was already deleted and doesn't exist
 		// Move on to next path
 		if err != nil {
@@ -227,7 +355,7 @@ func cleanImageCacheDir() error {
 			return nil
 		}
 		// If directory is empty, delete it
-		entries, err := ioutil.ReadDir(path)
+		entries, err := os.ReadDir(path)
 		if err != nil {
 			return err
 		}
@@ -243,10 +371,11 @@ func cleanImageCacheDir() error {
 
 // normalizeTagName automatically tag latest to image
 // Example:
-//  nginx -> nginx:latest
-//  localhost:5000/nginx -> localhost:5000/nginx:latest
-//  localhost:5000/nginx:latest -> localhost:5000/nginx:latest
-//  docker.io/dotnet/core/sdk -> docker.io/dotnet/core/sdk:latest
+//
+//	nginx -> nginx:latest
+//	localhost:5000/nginx -> localhost:5000/nginx:latest
+//	localhost:5000/nginx:latest -> localhost:5000/nginx:latest
+//	docker.io/dotnet/core/sdk -> docker.io/dotnet/core/sdk:latest
 func normalizeTagName(image string) string {
 	base := image
 	tag := "latest"
@@ -258,4 +387,10 @@ func normalizeTagName(image string) string {
 		tag = parts[len(parts)-1]
 	}
 	return base + ":" + tag
+}
+
+// Remove docker.io prefix since it won't be included in image names
+// when we call `docker images`.
+func TrimDockerIO(imageName string) string {
+	return strings.TrimPrefix(imageName, "docker.io/")
 }

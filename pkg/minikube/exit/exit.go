@@ -70,7 +70,7 @@ func Message(r reason.Kind, format string, args ...out.V) {
 // Code will exit with a code
 func Code(code int) {
 	if shell {
-		out.Output(os.Stdout, fmt.Sprintf("false exit code %d\n", code))
+		out.Outputf(os.Stdout, "false exit code %d\n", code)
 	}
 	os.Exit(code)
 }
@@ -89,5 +89,5 @@ func Error(r reason.Kind, msg string, err error) {
 	}
 	// By default, unmatched errors should show a link
 	r.NewIssueLink = true
-	Message(r, err.Error())
+	Message(r, fmt.Sprintf("%s: %v", msg, err))
 }

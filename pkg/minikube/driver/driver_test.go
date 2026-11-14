@@ -18,32 +18,33 @@ package driver
 
 import (
 	"fmt"
-	"io/ioutil"
 	"os"
 	"testing"
+	"time"
 
 	"github.com/google/go-cmp/cmp"
 	"k8s.io/minikube/pkg/minikube/config"
 	"k8s.io/minikube/pkg/minikube/registry"
+	"k8s.io/minikube/pkg/minikube/run"
 )
 
 func TestSupportedDrivers(t *testing.T) {
 	got := SupportedDrivers()
 	found := false
 	for _, s := range SupportedDrivers() {
-		if s == VirtualBox {
+		if s == SSH {
 			found = true
 		}
 	}
 
 	if found == false {
-		t.Errorf("%s not in supported drivers: %v", VirtualBox, got)
+		t.Errorf("%s not in supported drivers: %v", SSH, got)
 	}
 }
 
 func TestSupported(t *testing.T) {
-	if !Supported(VirtualBox) {
-		t.Errorf("Supported(%s) is false", VirtualBox)
+	if !Supported(SSH) {
+		t.Errorf("Supported(%s) is false", SSH)
 	}
 	if Supported("yabba?") {
 		t.Errorf("Supported(yabba?) is true")
@@ -61,18 +62,20 @@ func TestBareMetal(t *testing.T) {
 
 func TestMachineType(t *testing.T) {
 	types := map[string]string{
-		Podman:       "container",
-		Docker:       "container",
-		Mock:         "bare metal machine",
-		None:         "bare metal machine",
-		SSH:          "bare metal machine",
-		KVM2:         "VM",
-		VirtualBox:   "VM",
-		HyperKit:     "VM",
-		VMware:       "VM",
-		VMwareFusion: "VM",
-		HyperV:       "VM",
-		Parallels:    "VM",
+		Podman:     "container",
+		Docker:     "container",
+		Mock:       "bare metal machine",
+		None:       "bare metal machine",
+		SSH:        "bare metal machine",
+		KVM2:       "VM",
+		QEMU2:      "VM",
+		QEMU:       "VM",
+		VFKit:      "VM",
+		Krunkit:    "VM",
+		VirtualBox: "VM",
+		VMware:     "VM",
+		HyperV:     "VM",
+		Parallels:  "VM",
 	}
 
 	drivers := SupportedDrivers()
@@ -91,7 +94,7 @@ func TestFlagDefaults(t *testing.T) {
 		t.Errorf("defaults mismatch (-want +got):\n%s", diff)
 	}
 
-	tf, err := ioutil.TempFile("", "resolv.conf")
+	tf, err := os.CreateTemp("", "resolv.conf")
 	if err != nil {
 		t.Fatalf("tempfile: %v", err)
 	}
@@ -118,10 +121,11 @@ func TestSuggest(t *testing.T) {
 	}{
 		{
 			def: registry.DriverDef{
-				Name:     "unhealthy",
-				Default:  true,
-				Priority: registry.Default,
-				Status:   func() registry.State { return registry.State{Installed: true, Healthy: false} },
+				Name:         "unhealthy",
+				Default:      true,
+				ProbeTimeout: 1 * time.Millisecond,
+				Priority:     registry.Default,
+				Status:       func(_ *run.CommandOptions) registry.State { return registry.State{Installed: true, Healthy: false} },
 			},
 			choices: []string{"unhealthy"},
 			pick:    "",
@@ -130,10 +134,11 @@ func TestSuggest(t *testing.T) {
 		},
 		{
 			def: registry.DriverDef{
-				Name:     "discouraged",
-				Default:  false,
-				Priority: registry.Discouraged,
-				Status:   func() registry.State { return registry.State{Installed: true, Healthy: true} },
+				Name:         "discouraged",
+				Default:      false,
+				ProbeTimeout: 1 * time.Millisecond,
+				Priority:     registry.Discouraged,
+				Status:       func(_ *run.CommandOptions) registry.State { return registry.State{Installed: true, Healthy: true} },
 			},
 			choices: []string{"discouraged", "unhealthy"},
 			pick:    "",
@@ -142,10 +147,11 @@ func TestSuggest(t *testing.T) {
 		},
 		{
 			def: registry.DriverDef{
-				Name:     "default",
-				Default:  true,
-				Priority: registry.Default,
-				Status:   func() registry.State { return registry.State{Installed: true, Healthy: true} },
+				Name:         "default",
+				Default:      true,
+				ProbeTimeout: 1 * time.Millisecond,
+				Priority:     registry.Default,
+				Status:       func(_ *run.CommandOptions) registry.State { return registry.State{Installed: true, Healthy: true} },
 			},
 			choices: []string{"default", "discouraged", "unhealthy"},
 			pick:    "default",
@@ -154,10 +160,11 @@ func TestSuggest(t *testing.T) {
 		},
 		{
 			def: registry.DriverDef{
-				Name:     "preferred",
-				Default:  true,
-				Priority: registry.Preferred,
-				Status:   func() registry.State { return registry.State{Installed: true, Healthy: true} },
+				Name:         "preferred",
+				Default:      true,
+				ProbeTimeout: 1 * time.Millisecond,
+				Priority:     registry.Preferred,
+				Status:       func(_ *run.CommandOptions) registry.State { return registry.State{Installed: true, Healthy: true} },
 			},
 			choices: []string{"preferred", "default", "discouraged", "unhealthy"},
 			pick:    "preferred",
@@ -173,7 +180,7 @@ func TestSuggest(t *testing.T) {
 				}
 			}
 
-			got := Choices(false)
+			got := Choices(false, &run.CommandOptions{})
 			gotNames := []string{}
 			for _, c := range got {
 				gotNames = append(gotNames, c.Name)
@@ -262,7 +269,7 @@ func TestIndexFromMachineName(t *testing.T) {
 		t.Run(tc.Name, func(t *testing.T) {
 			got := IndexFromMachineName(tc.MachineName)
 			if got != tc.Want {
-				t.Errorf("want order %q but got %q", tc.Want, got)
+				t.Errorf("want order %d but got %d", tc.Want, got)
 
 			}
 		})

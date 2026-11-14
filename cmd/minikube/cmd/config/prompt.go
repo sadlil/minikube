@@ -21,6 +21,7 @@ import (
 	"io"
 	"log"
 	"os"
+	"slices"
 	"strings"
 
 	"golang.org/x/term"
@@ -36,7 +37,7 @@ func AskForYesNoConfirmation(s string, posResponses, negResponses []string) bool
 	reader := bufio.NewReader(os.Stdin)
 
 	for {
-		out.String("%s [y/n]: ", s)
+		out.Stringf("%s [y/n]: ", s)
 
 		response, err := reader.ReadString('\n')
 		if err != nil {
@@ -44,9 +45,9 @@ func AskForYesNoConfirmation(s string, posResponses, negResponses []string) bool
 		}
 
 		switch r := strings.ToLower(strings.TrimSpace(response)); {
-		case containsString(posResponses, r):
+		case slices.Contains(posResponses, r):
 			return true
-		case containsString(negResponses, r):
+		case slices.Contains(negResponses, r):
 			return false
 		default:
 			out.Err("Please type yes or no:")
@@ -78,7 +79,7 @@ func AskForStaticValueOptional(s string) string {
 }
 
 func getStaticValue(reader *bufio.Reader, s string) string {
-	out.String("%s", s)
+	out.String(s)
 
 	response, err := reader.ReadString('\n')
 	if err != nil {
@@ -135,22 +136,6 @@ func AskForPasswordValue(s string) string {
 		defer log.Fatal(err)
 	}
 	return result
-}
-
-// posString returns the first index of element in slice.
-// If slice does not contain element, returns -1.
-func posString(slice []string, element string) int {
-	for index, elem := range slice {
-		if elem == element {
-			return index
-		}
-	}
-	return -1
-}
-
-// containsString returns true if slice contains element
-func containsString(slice []string, element string) bool {
-	return posString(slice, element) != -1
 }
 
 // AskForStaticValidatedValue asks for a single value to enter and check for valid input

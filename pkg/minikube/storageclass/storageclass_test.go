@@ -18,9 +18,9 @@ package storageclass
 
 import (
 	"context"
-	"fmt"
-	"io/ioutil"
+	"errors"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -75,41 +75,41 @@ func (mockStorageV1InterfaceWithBadItem) StorageClasses() storagev1.StorageClass
 	return mockStorageClassInterfaceWithBadItem{}
 }
 
-func (mockStorageClassInterfaceOk) Get(ctx context.Context, name string, options metav1.GetOptions) (*v1.StorageClass, error) {
+func (mockStorageClassInterfaceOk) Get(_ context.Context, name string, _ metav1.GetOptions) (*v1.StorageClass, error) {
 	if strings.HasPrefix(name, "bad-class") {
-		return nil, fmt.Errorf("mocked error. No such class")
+		return nil, errors.New("mocked error. No such class")
 	}
 	sc := v1.StorageClass{Provisioner: name}
 	return &sc, nil
 }
 
-func (m mockStorageClassInterfaceOk) List(ctx context.Context, opts metav1.ListOptions) (*v1.StorageClassList, error) {
+func (m mockStorageClassInterfaceOk) List(_ context.Context, _ metav1.ListOptions) (*v1.StorageClassList, error) {
 	scl := v1.StorageClassList{}
 	sc := v1.StorageClass{Provisioner: "standard"}
 	scl.Items = append(scl.Items, sc)
 	return &scl, nil
 }
 
-func (m mockStorageClassInterfaceWithBadItem) List(ctx context.Context, opts metav1.ListOptions) (*v1.StorageClassList, error) {
+func (m mockStorageClassInterfaceWithBadItem) List(_ context.Context, _ metav1.ListOptions) (*v1.StorageClassList, error) {
 	scl := v1.StorageClassList{}
 	sc := v1.StorageClass{Provisioner: "bad", ObjectMeta: metav1.ObjectMeta{Name: "standard"}}
 	scl.Items = append(scl.Items, sc)
 	return &scl, nil
 }
-func (mockStorageClassInterfaceListErr) List(ctx context.Context, opts metav1.ListOptions) (*v1.StorageClassList, error) {
-	return nil, fmt.Errorf("mocked list error")
+func (mockStorageClassInterfaceListErr) List(_ context.Context, _ metav1.ListOptions) (*v1.StorageClassList, error) {
+	return nil, errors.New("mocked list error")
 }
 
-func (mockStorageClassInterfaceOk) Update(ctx context.Context, sc *v1.StorageClass, opts metav1.UpdateOptions) (*v1.StorageClass, error) {
+func (mockStorageClassInterfaceOk) Update(_ context.Context, sc *v1.StorageClass, _ metav1.UpdateOptions) (*v1.StorageClass, error) {
 	if strings.HasPrefix(sc.Provisioner, "bad") {
-		return nil, fmt.Errorf("bad provisioner")
+		return nil, errors.New("bad provisioner")
 	}
 	return &v1.StorageClass{}, nil
 }
 
-func (mockStorageClassInterfaceWithBadItem) Update(ctx context.Context, sc *v1.StorageClass, opts metav1.UpdateOptions) (*v1.StorageClass, error) {
+func (mockStorageClassInterfaceWithBadItem) Update(_ context.Context, sc *v1.StorageClass, _ metav1.UpdateOptions) (*v1.StorageClass, error) {
 	if strings.HasPrefix(sc.Provisioner, "bad") {
-		return nil, fmt.Errorf("bad provisioner")
+		return nil, errors.New("bad provisioner")
 	}
 	return &v1.StorageClass{}, nil
 }
@@ -229,19 +229,16 @@ func TestGetStoragev1(t *testing.T) {
 			err:         true,
 		},
 	}
-	configFile, err := ioutil.TempFile("/tmp", "")
-	if err != nil {
-		t.Fatalf(err.Error())
-	}
-	defer os.Remove(configFile.Name())
+
 	for _, test := range tests {
 		t.Run(test.description, func(t *testing.T) {
-			if err := setK8SConfig(test.config, configFile.Name()); err != nil {
-				t.Fatalf(err.Error())
-			}
+			tmpDir := t.TempDir()
+			kubeconfigPath := filepath.Join(tmpDir, "kubeconfig")
+
+			setK8SConfig(t, test.config, kubeconfigPath)
 
 			// context name is hardcoded by mockK8sConfig
-			_, err = GetStoragev1("minikube")
+			_, err := GetStoragev1("minikube")
 			if err != nil && !test.err {
 				t.Fatalf("Unexpected err: %v for test: %v", err, test.description)
 			}
@@ -252,13 +249,9 @@ func TestGetStoragev1(t *testing.T) {
 	}
 }
 
-func setK8SConfig(config, kubeconfigPath string) error {
-	mockK8sConfigByte := []byte(config)
-	mockK8sConfigPath := kubeconfigPath
-	err := ioutil.WriteFile(mockK8sConfigPath, mockK8sConfigByte, 0644)
-	if err != nil {
-		return fmt.Errorf("Unexpected error when writing to file %v. Error: %v", kubeconfigPath, err)
+func setK8SConfig(t *testing.T, config, kubeconfigPath string) {
+	if err := os.WriteFile(kubeconfigPath, []byte(config), 0o644); err != nil {
+		t.Fatalf("unexpected error when writing to %v: %v", kubeconfigPath, err)
 	}
-	os.Setenv("KUBECONFIG", mockK8sConfigPath)
-	return nil
+	t.Setenv("KUBECONFIG", kubeconfigPath)
 }

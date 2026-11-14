@@ -17,7 +17,6 @@ limitations under the License.
 package addons
 
 import (
-	"io/ioutil"
 	"os"
 	"path/filepath"
 	"sync"
@@ -26,27 +25,15 @@ import (
 	"k8s.io/minikube/pkg/minikube/assets"
 	"k8s.io/minikube/pkg/minikube/config"
 	"k8s.io/minikube/pkg/minikube/localpath"
+	"k8s.io/minikube/pkg/minikube/run"
 	"k8s.io/minikube/pkg/minikube/tests"
 )
 
 func createTestProfile(t *testing.T) string {
 	t.Helper()
-	td, err := ioutil.TempDir("", "profile")
-	if err != nil {
-		t.Fatalf("tempdir: %v", err)
-	}
+	td := t.TempDir()
 
-	t.Cleanup(func() {
-		err := os.RemoveAll(td)
-		t.Logf("remove path %q", td)
-		if err != nil {
-			t.Errorf("failed to clean up temp folder  %q", td)
-		}
-	})
-	err = os.Setenv(localpath.MinikubeHome, td)
-	if err != nil {
-		t.Errorf("error setting up test environment. could not set %s", localpath.MinikubeHome)
-	}
+	t.Setenv(localpath.MinikubeHome, td)
 
 	// Not necessary, but it is a handy random alphanumeric
 	name := filepath.Base(td)
@@ -59,6 +46,7 @@ func createTestProfile(t *testing.T) string {
 		CPUs:             2,
 		Memory:           2500,
 		KubernetesConfig: config.KubernetesConfig{},
+		Nodes:            []config.Node{{ControlPlane: true}},
 	}
 
 	if err := config.DefaultLoader.WriteConfigToFile(name, cc); err != nil {
@@ -68,9 +56,12 @@ func createTestProfile(t *testing.T) string {
 }
 
 func TestIsAddonAlreadySet(t *testing.T) {
-	cc := &config.ClusterConfig{Name: "test"}
+	cc := &config.ClusterConfig{
+		Name:  "test",
+		Nodes: []config.Node{{ControlPlane: true}},
+	}
 
-	if err := Set(cc, "registry", "true"); err != nil {
+	if err := Set(cc, "registry", "true", &run.CommandOptions{}); err != nil {
 		t.Errorf("unable to set registry true: %v", err)
 	}
 	if !assets.Addons["registry"].IsEnabled(cc) {
@@ -84,17 +75,23 @@ func TestIsAddonAlreadySet(t *testing.T) {
 }
 
 func TestDisableUnknownAddon(t *testing.T) {
-	cc := &config.ClusterConfig{Name: "test"}
+	cc := &config.ClusterConfig{
+		Name:  "test",
+		Nodes: []config.Node{{ControlPlane: true}},
+	}
 
-	if err := Set(cc, "InvalidAddon", "false"); err == nil {
+	if err := Set(cc, "InvalidAddon", "false", &run.CommandOptions{}); err == nil {
 		t.Fatalf("Disable did not return error for unknown addon")
 	}
 }
 
 func TestEnableUnknownAddon(t *testing.T) {
-	cc := &config.ClusterConfig{Name: "test"}
+	cc := &config.ClusterConfig{
+		Name:  "test",
+		Nodes: []config.Node{{ControlPlane: true}},
+	}
 
-	if err := Set(cc, "InvalidAddon", "true"); err == nil {
+	if err := Set(cc, "InvalidAddon", "true", &run.CommandOptions{}); err == nil {
 		t.Fatalf("Enable did not return error for unknown addon")
 	}
 }
@@ -103,8 +100,8 @@ func TestSetAndSave(t *testing.T) {
 	profile := createTestProfile(t)
 
 	// enable
-	if err := SetAndSave(profile, "dashboard", "true"); err != nil {
-		t.Errorf("Disable returned unexpected error: " + err.Error())
+	if err := SetAndSave(profile, "dashboard", "true", &run.CommandOptions{}); err != nil {
+		t.Errorf("Disable returned unexpected error: %v", err)
 	}
 
 	c, err := config.DefaultLoader.LoadConfigFromFile(profile)
@@ -116,8 +113,8 @@ func TestSetAndSave(t *testing.T) {
 	}
 
 	// disable
-	if err := SetAndSave(profile, "dashboard", "false"); err != nil {
-		t.Errorf("Disable returned unexpected error: " + err.Error())
+	if err := SetAndSave(profile, "dashboard", "false", &run.CommandOptions{}); err != nil {
+		t.Errorf("Disable returned unexpected error: %v", err)
 	}
 
 	c, err = config.DefaultLoader.LoadConfigFromFile(profile)
@@ -129,24 +126,59 @@ func TestSetAndSave(t *testing.T) {
 	}
 }
 
-func TestStart(t *testing.T) {
+func TestStartWithAddonsEnabled(t *testing.T) {
 	// this test will write a config.json into MinikubeHome, create a temp dir for it
-	tempDir := tests.MakeTempDir()
-	defer tests.RemoveTempDir(tempDir)
+	tests.MakeTempDir(t)
 
 	cc := &config.ClusterConfig{
 		Name:             "start",
 		CPUs:             2,
 		Memory:           2500,
 		KubernetesConfig: config.KubernetesConfig{},
+		Nodes:            []config.Node{{ControlPlane: true}},
 	}
-
+	options := &run.CommandOptions{}
+	toEnable := ToEnable(cc, map[string]bool{}, []string{"dashboard"})
+	enabled := make(chan []string, 1)
 	var wg sync.WaitGroup
 	wg.Add(1)
-	go Start(&wg, cc, map[string]bool{}, []string{"dashboard"})
+	go Enable(&wg, cc, toEnable, enabled, options)
 	wg.Wait()
+	if ea, ok := <-enabled; ok {
+		UpdateConfigToEnable(cc, ea, options)
+	}
 
 	if !assets.Addons["dashboard"].IsEnabled(cc) {
 		t.Errorf("expected dashboard to be enabled")
+	}
+}
+
+func TestStartWithAllAddonsDisabled(t *testing.T) {
+	// this test will write a config.json into MinikubeHome, create a temp dir for it
+	tests.MakeTempDir(t)
+
+	cc := &config.ClusterConfig{
+		Name:             "start",
+		CPUs:             2,
+		Memory:           2500,
+		KubernetesConfig: config.KubernetesConfig{},
+		Nodes:            []config.Node{{ControlPlane: true}},
+	}
+
+	UpdateConfigToDisable(cc, &run.CommandOptions{})
+
+	for name := range assets.Addons {
+		if assets.Addons[name].IsEnabled(cc) {
+			t.Errorf("expected %s to be disabled", name)
+		}
+	}
+}
+
+func TestPreStartMessages(t *testing.T) {
+	addons := []string{"ingress", "ambassador", "olm", "nvidia-gpu-device-plugin", "dashboard"}
+	for _, a := range addons {
+		// Should execute cleanly without panic
+		preStartMessages(a, "true")
+		preStartMessages(a, "false")
 	}
 }

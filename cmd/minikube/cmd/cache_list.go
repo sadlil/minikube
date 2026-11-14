@@ -40,7 +40,7 @@ var listCacheCmd = &cobra.Command{
 	Use:   "list",
 	Short: "List all available images from the local cache.",
 	Long:  "List all available images from the local cache.",
-	Run: func(cmd *cobra.Command, args []string) {
+	Run: func(_ *cobra.Command, _ []string) {
 		images, err := cmdConfig.ListConfigMap(cacheImageConfigKey)
 		if err != nil {
 			exit.Error(reason.InternalListConfig, "Failed to get image map", err)
@@ -53,8 +53,8 @@ var listCacheCmd = &cobra.Command{
 
 func init() {
 	listCacheCmd.Flags().StringVar(&cacheListFormat, "format", defaultCacheListFormat,
-		`Go template format string for the cache list output.  The format for Go templates can be found here: https://golang.org/pkg/text/template/
-For the list of accessible variables for the template, see the struct values here: https://godoc.org/k8s.io/minikube/cmd/minikube/cmd#CacheListTemplate`)
+		`Go template format string for the cache list output.  The format for Go templates can be found here: https://pkg.go.dev/text/template
+For the list of accessible variables for the template, see the struct values here: https://pkg.go.dev/k8s.io/minikube/cmd/minikube/cmd#CacheListTemplate`)
 	cacheCmd.AddCommand(listCacheCmd)
 }
 

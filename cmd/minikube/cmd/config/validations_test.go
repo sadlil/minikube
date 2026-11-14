@@ -17,7 +17,9 @@ limitations under the License.
 package config
 
 import (
+	"net/url"
 	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -101,7 +103,8 @@ func TestValidCIDR(t *testing.T) {
 func TestValidRuntime(t *testing.T) {
 	var tests = []validationTest{
 		{
-			value:     "", // default
+			// "" is accepted: cruntime.New maps it to docker for pre-2022 profiles.
+			value:     "",
 			shouldErr: false,
 		},
 		{
@@ -126,23 +129,141 @@ func TestValidRuntime(t *testing.T) {
 }
 
 func TestIsURLExists(t *testing.T) {
-
 	self, err := os.Executable()
 	if err != nil {
 		t.Error(err)
 	}
 
+	u := (&url.URL{
+		Scheme: "file",
+		Path:   filepath.ToSlash(self),
+	}).String()
+
 	tests := []validationTest{
 		{
-			value:     "file://" + self,
+			value:     u,
 			shouldErr: false,
 		},
-
 		{
-			value:     "file://" + self + "/subpath-of-file",
+			value:     u + "/subpath-of-file",
 			shouldErr: true,
 		},
 	}
 
 	runValidations(t, tests, "url", IsURLExists)
+}
+
+func TestIsValidCPUs(t *testing.T) {
+	tests := []validationTest{
+		{"2", false},
+		{"16", false},
+		{"max", false},
+		{"no-limit", false},
+		{"abc", true},
+		{"-2", true},
+		{"", true},
+	}
+
+	runValidations(t, tests, "cpus", IsValidCPUs)
+}
+
+func TestIsValidMemory(t *testing.T) {
+	tests := []validationTest{
+		{"4000mb", false},
+		{"8gb", false},
+		{"max", false},
+		{"no-limit", false},
+		{"-4000", true},
+		{"abc", true},
+		{"", true},
+	}
+
+	runValidations(t, tests, "memory", IsValidMemory)
+}
+
+func TestIsValidIPAddressSlice(t *testing.T) {
+	var tests = []validationTest{
+		{
+			value:     "8.8.8.8",
+			shouldErr: false,
+		},
+		{
+			value:     "8.8.8.8,1.1.1.1",
+			shouldErr: false,
+		},
+		{
+			value:     "192.168.1.1",
+			shouldErr: false,
+		},
+		{
+			value:     "10.0.0.1,172.16.0.1,8.8.4.4",
+			shouldErr: false,
+		},
+		{
+			value:     "::1",
+			shouldErr: false,
+		},
+		{
+			value:     "2001:4860:4860::8888",
+			shouldErr: false,
+		},
+		{
+			value:     "8.8.8.8,2001:4860:4860::8844",
+			shouldErr: false,
+		},
+		{
+			value:     "::ffff:8.8.8.8",
+			shouldErr: false,
+		},
+		{
+			value:     "",
+			shouldErr: true,
+		},
+		{
+			value:     "   ",
+			shouldErr: true,
+		},
+		{
+			value:     " 8.8.8.8",
+			shouldErr: true,
+		},
+		{
+			value:     "8.8.8.8 ",
+			shouldErr: true,
+		},
+		{
+			value:     "8.8.8.8, 1.1.1.1",
+			shouldErr: true,
+		},
+		{
+			value:     "not-an-ip",
+			shouldErr: true,
+		},
+		{
+			value:     "8.8.8.8,not-valid",
+			shouldErr: true,
+		},
+		{
+			value:     ",8.8.8.8",
+			shouldErr: true,
+		},
+		{
+			value:     "8.8.8.8,",
+			shouldErr: true,
+		},
+		{
+			value:     "8.8.8.8,,1.1.1.1",
+			shouldErr: true,
+		},
+		{
+			value:     "999.999.999.999",
+			shouldErr: true,
+		},
+		{
+			value:     "8.8.8",
+			shouldErr: true,
+		},
+	}
+
+	runValidations(t, tests, "dns-servers", IsValidIPAddressSlice)
 }

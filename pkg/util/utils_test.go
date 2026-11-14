@@ -1,3 +1,5 @@
+//go:build !windows
+
 /*
 Copyright 2016 The Kubernetes Authors All rights reserved.
 
@@ -17,14 +19,13 @@ limitations under the License.
 package util
 
 import (
-	"io/ioutil"
 	"os"
 	"os/user"
-	"runtime"
 	"syscall"
 	"testing"
 
 	"github.com/blang/semver/v4"
+	"github.com/google/go-cmp/cmp"
 )
 
 func TestGetBinaryDownloadURL(t *testing.T) {
@@ -39,7 +40,7 @@ func TestGetBinaryDownloadURL(t *testing.T) {
 	}
 
 	for _, tt := range testData {
-		url := GetBinaryDownloadURL(tt.version, tt.platform, runtime.GOARCH)
+		url := GetBinaryDownloadURL(tt.version, tt.platform, "amd64")
 		if url != tt.expectedURL {
 			t.Fatalf("Expected '%s' but got '%s'", tt.expectedURL, url)
 		}
@@ -81,20 +82,10 @@ func TestParseKubernetesVersion(t *testing.T) {
 }
 
 func TestChownR(t *testing.T) {
-	testDir, err := ioutil.TempDir(os.TempDir(), "")
-	if nil != err {
+	testDir := t.TempDir()
+	if _, err := os.Create(testDir + "/TestChownR"); err != nil {
 		return
 	}
-	_, err = os.Create(testDir + "/TestChownR")
-	if nil != err {
-		return
-	}
-	defer func() { // clean up tempdir
-		err := os.RemoveAll(testDir)
-		if err != nil {
-			t.Errorf("failed to clean up temp folder  %q", testDir)
-		}
-	}()
 
 	cases := []struct {
 		name          string
@@ -123,7 +114,7 @@ func TestChownR(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			err = ChownR(testDir+"/TestChownR", c.uid, c.gid)
+			err := ChownR(testDir+"/TestChownR", c.uid, c.gid)
 			fileInfo, _ := os.Stat(testDir + "/TestChownR")
 			fileSys := fileInfo.Sys()
 			if (nil != err) != c.expectedError || ((false == c.expectedError) && (fileSys.(*syscall.Stat_t).Gid != uint32(c.gid) || fileSys.(*syscall.Stat_t).Uid != uint32(c.uid))) {
@@ -133,28 +124,16 @@ func TestChownR(t *testing.T) {
 	}
 }
 
+// this test runs on non-windows because of the build tag at the top of the file
 func TestMaybeChownDirRecursiveToMinikubeUser(t *testing.T) {
-	testDir, err := ioutil.TempDir(os.TempDir(), "")
-	if nil != err {
-		return
-	}
-	_, err = os.Create(testDir + "/TestChownR")
-	if nil != err {
-		return
-	}
 
-	defer func() { // clean up tempdir
-		err := os.RemoveAll(testDir)
-		if err != nil {
-			t.Errorf("failed to clean up temp folder  %q", testDir)
-		}
-	}()
+	testDir := t.TempDir()
+	if _, err := os.Create(testDir + "/TestChownR"); nil != err {
+		return
+	}
 
 	if os.Getenv("CHANGE_MINIKUBE_NONE_USER") == "" {
-		err = os.Setenv("CHANGE_MINIKUBE_NONE_USER", "1")
-		if nil != err {
-			t.Error("failed to set env: CHANGE_MINIKUBE_NONE_USER")
-		}
+		t.Setenv("CHANGE_MINIKUBE_NONE_USER", "1")
 	}
 
 	if os.Getenv("SUDO_USER") == "" {
@@ -162,11 +141,7 @@ func TestMaybeChownDirRecursiveToMinikubeUser(t *testing.T) {
 		if nil != err {
 			t.Error("fail to get user")
 		}
-		os.Setenv("SUDO_USER", user.Username)
-		err = os.Setenv("SUDO_USER", user.Username)
-		if nil != err {
-			t.Error("failed to set env: SUDO_USER")
-		}
+		t.Setenv("SUDO_USER", user.Username)
 	}
 
 	cases := []struct {
@@ -180,7 +155,7 @@ func TestMaybeChownDirRecursiveToMinikubeUser(t *testing.T) {
 			expectedError: false,
 		},
 		{
-			name:          "invaild dir",
+			name:          "invalid dir",
 			dir:           "./utils_test",
 			expectedError: true,
 		},
@@ -188,9 +163,51 @@ func TestMaybeChownDirRecursiveToMinikubeUser(t *testing.T) {
 
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			err = MaybeChownDirRecursiveToMinikubeUser(c.dir)
+			err := MaybeChownDirRecursiveToMinikubeUser(c.dir)
 			if (nil != err) != c.expectedError {
 				t.Errorf("expectedError: %v, got: %v", c.expectedError, err)
+			}
+		})
+	}
+}
+
+func TestRemoveDuplicateStrings(t *testing.T) {
+	testCases := []struct {
+		desc  string
+		slice []string
+		want  []string
+	}{
+		{
+			desc:  "NoDuplicates",
+			slice: []string{"alpha", "bravo", "charlie"},
+			want:  []string{"alpha", "bravo", "charlie"},
+		},
+		{
+			desc:  "AdjacentDuplicates",
+			slice: []string{"alpha", "bravo", "bravo", "charlie"},
+			want:  []string{"alpha", "bravo", "charlie"},
+		},
+		{
+			desc:  "NonAdjacentDuplicates",
+			slice: []string{"alpha", "bravo", "alpha", "charlie"},
+			want:  []string{"alpha", "bravo", "charlie"},
+		},
+		{
+			desc:  "MultipleDuplicates",
+			slice: []string{"alpha", "bravo", "alpha", "alpha", "charlie", "charlie", "alpha", "bravo"},
+			want:  []string{"alpha", "bravo", "charlie"},
+		},
+		{
+			desc:  "UnsortedDuplicates",
+			slice: []string{"charlie", "bravo", "alpha", "bravo"},
+			want:  []string{"charlie", "bravo", "alpha"},
+		},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.desc, func(t *testing.T) {
+			got := RemoveDuplicateStrings(tc.slice)
+			if diff := cmp.Diff(got, tc.want); diff != "" {
+				t.Errorf("RemoveDuplicateStrings(%v) = %v, want: %v", tc.slice, got, tc.want)
 			}
 		})
 	}

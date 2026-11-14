@@ -21,13 +21,17 @@ import (
 	"encoding/json"
 	"fmt"
 	"html/template"
+	"os"
 	"os/exec"
 	"path"
 	"strings"
+	"time"
 
-	"github.com/pkg/errors"
+	"github.com/blang/semver/v4"
+
 	"k8s.io/klog/v2"
 	"k8s.io/minikube/pkg/minikube/command"
+	"k8s.io/minikube/pkg/util/retry"
 )
 
 // container maps to 'runc list -f json'
@@ -36,12 +40,26 @@ type container struct {
 	Status string
 }
 
+type crictlImages struct {
+	Images []struct {
+		ID          string      `json:"id"`
+		RepoTags    []string    `json:"repoTags"`
+		RepoDigests []string    `json:"repoDigests"`
+		Size        string      `json:"size"`
+		UID         interface{} `json:"uid"`
+		Username    string      `json:"username"`
+	} `json:"images"`
+}
+
+// timeoutOverride flag overrides the default 2s timeout for crictl commands
+const timeoutOverrideFlag = "--timeout=10s"
+
 // crictlList returns the output of 'crictl ps' in an efficient manner
 func crictlList(cr CommandRunner, root string, o ListContainersOptions) (*command.RunResult, error) {
 	klog.Infof("listing CRI containers in root %s: %+v", root, o)
 
 	// Use -a because otherwise paused containers are missed
-	baseCmd := []string{"crictl", "ps", "-a", "--quiet"}
+	baseCmd := []string{"crictl", timeoutOverrideFlag, "ps", "-a", "--quiet"}
 
 	if o.Name != "" {
 		baseCmd = append(baseCmd, fmt.Sprintf("--name=%s", o.Name))
@@ -66,13 +84,13 @@ func crictlList(cr CommandRunner, root string, o ListContainersOptions) (*comman
 func listCRIContainers(cr CommandRunner, root string, o ListContainersOptions) ([]string, error) {
 	rr, err := crictlList(cr, root, o)
 	if err != nil {
-		return nil, errors.Wrap(err, "crictl list")
+		return nil, fmt.Errorf("crictl list: %w", err)
 	}
 
 	// Avoid an id named ""
 	var ids []string
 	seen := map[string]bool{}
-	for _, id := range strings.Split(rr.Stdout.String(), "\n") {
+	for id := range strings.SplitSeq(rr.Stdout.String(), "\n") {
 		klog.Infof("found id: %q", id)
 		if id != "" && !seen[id] {
 			ids = append(ids, id)
@@ -97,7 +115,7 @@ func listCRIContainers(cr CommandRunner, root string, o ListContainersOptions) (
 	args = append(args, "list", "-f", "json")
 	rr, err = cr.RunCmd(exec.Command("sudo", args...))
 	if err != nil {
-		return nil, errors.Wrap(err, "runc")
+		return nil, fmt.Errorf("runc: %w", err)
 	}
 	content := rr.Stdout.Bytes()
 	klog.Infof("JSON = %s", content)
@@ -127,18 +145,18 @@ func listCRIContainers(cr CommandRunner, root string, o ListContainersOptions) (
 	return fids, nil
 }
 
-// pauseContainers pauses a list of containers
+// pauseCRIContainers pauses a list of containers
 func pauseCRIContainers(cr CommandRunner, root string, ids []string) error {
-	args := []string{"runc"}
+	baseArgs := []string{"runc"}
 	if root != "" {
-		args = append(args, "--root", root)
+		baseArgs = append(baseArgs, "--root", root)
 	}
-	args = append(args, "pause")
-
+	baseArgs = append(baseArgs, "pause")
 	for _, id := range ids {
-		cargs := append(args, id)
-		if _, err := cr.RunCmd(exec.Command("sudo", cargs...)); err != nil {
-			return errors.Wrap(err, "runc")
+		args := baseArgs
+		args = append(args, id)
+		if _, err := cr.RunCmd(exec.Command("sudo", args...)); err != nil {
+			return fmt.Errorf("runc: %w", err)
 		}
 	}
 	return nil
@@ -161,17 +179,17 @@ func unpauseCRIContainers(cr CommandRunner, root string, ids []string) error {
 		args = append(args, "--root", root)
 	}
 	args = append(args, "resume")
-
+	cargs := args
 	for _, id := range ids {
-		cargs := append(args, id)
+		cargs := append(cargs, id)
 		if _, err := cr.RunCmd(exec.Command("sudo", cargs...)); err != nil {
-			return errors.Wrap(err, "runc")
+			return fmt.Errorf("runc: %w", err)
 		}
 	}
 	return nil
 }
 
-// criCRIContainers kills a list of containers using crictl
+// killCRIContainers kills a list of containers using crictl
 func killCRIContainers(cr CommandRunner, ids []string) error {
 	if len(ids) == 0 {
 		return nil
@@ -179,10 +197,10 @@ func killCRIContainers(cr CommandRunner, ids []string) error {
 	klog.Infof("Killing containers: %s", ids)
 
 	crictl := getCrictlPath(cr)
-	args := append([]string{crictl, "rm"}, ids...)
+	args := append([]string{crictl, "rm", "--force"}, ids...)
 	c := exec.Command("sudo", args...)
 	if _, err := cr.RunCmd(c); err != nil {
-		return errors.Wrap(err, "crictl")
+		return fmt.Errorf("crictl: %w", err)
 	}
 	return nil
 }
@@ -195,20 +213,53 @@ func pullCRIImage(cr CommandRunner, name string) error {
 	args := append([]string{crictl, "pull"}, name)
 	c := exec.Command("sudo", args...)
 	if _, err := cr.RunCmd(c); err != nil {
-		return errors.Wrap(err, "crictl")
+		return fmt.Errorf("crictl: %w", err)
 	}
 	return nil
 }
 
 // removeCRIImage remove image using crictl
-func removeCRIImage(cr CommandRunner, name string) error {
+// verifyRemoval only used for CRIO due to #22242
+func removeCRIImage(cr CommandRunner, name string, verifyRemoval bool) error {
 	klog.Infof("Removing image: %s", name)
 
 	crictl := getCrictlPath(cr)
 	args := append([]string{crictl, "rmi"}, name)
 	c := exec.Command("sudo", args...)
-	if _, err := cr.RunCmd(c); err != nil {
-		return errors.Wrap(err, "crictl")
+	var err error
+	success := false
+	if _, err = cr.RunCmd(c); err == nil {
+		success = true
+	} else if _, err := cr.RunCmd(exec.Command("sudo", crictl, "rmi", AddDockerIO(name))); err == nil {
+		// see https://github.com/containers/podman/issues/15974
+		success = true
+	} else if _, err := cr.RunCmd(exec.Command("sudo", crictl, "rmi", AddLocalhostPrefix(name))); err == nil {
+		success = true
+	}
+
+	if !success {
+		return fmt.Errorf("crictl: %w", err)
+	}
+
+	if !verifyRemoval {
+		return nil
+	}
+
+	// Verify that the image is removed
+	checkFunc := func() error {
+		c := exec.Command("sudo", crictl, "images", "--quiet", name)
+		rr, err := cr.RunCmd(c)
+		if err != nil {
+			return err
+		}
+		if len(strings.TrimSpace(rr.Stdout.String())) > 0 {
+			return fmt.Errorf("image %s still exists", name)
+		}
+		return nil
+	}
+
+	if err := retry.Expo(checkFunc, 250*time.Millisecond, 10*time.Second); err != nil {
+		return fmt.Errorf("image %s still exists after removal: %w", name, err)
 	}
 	return nil
 }
@@ -221,10 +272,14 @@ func stopCRIContainers(cr CommandRunner, ids []string) error {
 	klog.Infof("Stopping containers: %s", ids)
 
 	crictl := getCrictlPath(cr)
-	args := append([]string{crictl, "stop"}, ids...)
+	// bring crictl stop timeout on par with docker:
+	// - docker stop --help => -t, --time int   Seconds to wait for stop before killing it (default 10)
+	// - crictl stop --help => --timeout value, -t value  Seconds to wait to kill the container after a graceful stop is requested (default: 0)
+	// to prevent "stuck" containers blocking ports (eg, "[ERROR Port-2379|2380]: Port 2379|2380 is in use" for etcd during "hot" k8s upgrade)
+	args := append([]string{crictl, "stop", "--timeout=10"}, ids...)
 	c := exec.Command("sudo", args...)
 	if _, err := cr.RunCmd(c); err != nil {
-		return errors.Wrap(err, "crictl")
+		return fmt.Errorf("crictl: %w", err)
 	}
 	return nil
 }
@@ -232,9 +287,7 @@ func stopCRIContainers(cr CommandRunner, ids []string) error {
 // populateCRIConfig sets up /etc/crictl.yaml
 func populateCRIConfig(cr CommandRunner, socket string) error {
 	cPath := "/etc/crictl.yaml"
-	tmpl := `runtime-endpoint: unix://{{.Socket}}
-image-endpoint: unix://{{.Socket}}
-`
+	tmpl := "runtime-endpoint: unix://{{.Socket}}\n"
 	t, err := template.New("crictl").Parse(tmpl)
 	if err != nil {
 		return err
@@ -246,18 +299,18 @@ image-endpoint: unix://{{.Socket}}
 	}
 	c := exec.Command("/bin/bash", "-c", fmt.Sprintf("sudo mkdir -p %s && printf %%s \"%s\" | sudo tee %s", path.Dir(cPath), b.String(), cPath))
 	if rr, err := cr.RunCmd(c); err != nil {
-		return errors.Wrapf(err, "Run: %q", rr.Command())
+		return fmt.Errorf("Run: %q: %w", rr.Command(), err)
 	}
 	return nil
 }
 
 // getCRIInfo returns current information
 func getCRIInfo(cr CommandRunner) (map[string]interface{}, error) {
-	args := []string{"crictl", "info"}
+	args := []string{"crictl", timeoutOverrideFlag, "info"}
 	c := exec.Command("sudo", args...)
 	rr, err := cr.RunCmd(c)
 	if err != nil {
-		return nil, errors.Wrap(err, "get cri info")
+		return nil, fmt.Errorf("get cri info: %w", err)
 	}
 	info := rr.Stdout.String()
 	jsonMap := make(map[string]interface{})
@@ -268,15 +321,42 @@ func getCRIInfo(cr CommandRunner) (map[string]interface{}, error) {
 	return jsonMap, nil
 }
 
+// listCRIImages lists images using crictl
+func listCRIImages(cr CommandRunner) ([]ListImage, error) {
+	c := exec.Command("sudo", "crictl", timeoutOverrideFlag, "images", "--output", "json")
+	rr, err := cr.RunCmd(c)
+	if err != nil {
+		return nil, fmt.Errorf("crictl images: %w", err)
+	}
+
+	var jsonImages crictlImages
+	err = json.Unmarshal(rr.Stdout.Bytes(), &jsonImages)
+	if err != nil {
+		klog.Errorf("failed to unmarshal images, will assume images are not preloaded")
+		return nil, err
+	}
+
+	images := []ListImage{}
+	for _, img := range jsonImages.Images {
+		images = append(images, ListImage{
+			ID:          img.ID,
+			RepoDigests: img.RepoDigests,
+			RepoTags:    img.RepoTags,
+			Size:        img.Size,
+		})
+	}
+	return images, nil
+}
+
 // criContainerLogCmd returns the command to retrieve the log for a container based on ID
-func criContainerLogCmd(cr CommandRunner, id string, len int, follow bool) string {
+func criContainerLogCmd(cr CommandRunner, id string, length int, follow bool) string {
 	crictl := getCrictlPath(cr)
 	var cmd strings.Builder
 	cmd.WriteString("sudo ")
 	cmd.WriteString(crictl)
 	cmd.WriteString(" logs ")
-	if len > 0 {
-		cmd.WriteString(fmt.Sprintf("--tail %d ", len))
+	if length > 0 {
+		fmt.Fprintf(&cmd, "--tail %d ", length)
 	}
 	if follow {
 		cmd.WriteString("--follow ")
@@ -289,11 +369,35 @@ func criContainerLogCmd(cr CommandRunner, id string, len int, follow bool) strin
 // addRepoTagToImageName makes sure the image name has a repo tag in it.
 // in crictl images list have the repo tag prepended to them
 // for example "kubernetesui/dashboard:v2.0.0 will show up as "docker.io/kubernetesui/dashboard:v2.0.0"
-// warning this is only meant for kuberentes images where we know the GCR addreses have .io in them
+// warning this is only meant for kubernetes images where we know the GCR addresses have .io in them
 // not mean to be used for public images
 func addRepoTagToImageName(imgName string) string {
 	if !strings.Contains(imgName, ".io/") {
 		return "docker.io/" + imgName
 	} // else it already has repo name dont add anything
 	return imgName
+}
+
+// kubeletCRIOptions returns the container runtime options for the kubelet
+func kubeletCRIOptions(cr Manager, kubernetesVersion semver.Version) map[string]string {
+	opts := map[string]string{
+		"container-runtime-endpoint": fmt.Sprintf("unix://%s", cr.SocketPath()),
+	}
+	if kubernetesVersion.LT(semver.MustParse("1.24.0-alpha.0")) {
+		opts["container-runtime"] = "remote"
+	}
+	return opts
+}
+
+func checkCNIPlugins(kubernetesVersion semver.Version) error {
+	if kubernetesVersion.LT(semver.Version{Major: 1, Minor: 24}) {
+		return nil
+	}
+	_, err := os.Stat("/opt/cni/bin")
+	return err
+}
+
+// Add localhost prefix if the registry part is missing
+func AddLocalhostPrefix(name string) string {
+	return addRegistryPreix(name, "localhost")
 }

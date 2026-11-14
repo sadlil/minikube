@@ -18,17 +18,12 @@ limitations under the License.
 package bsutil
 
 import (
+	"fmt"
 	"os/exec"
-	"path"
 
-	"github.com/pkg/errors"
 	"k8s.io/minikube/pkg/minikube/assets"
 	"k8s.io/minikube/pkg/minikube/command"
-	"k8s.io/minikube/pkg/minikube/vmpath"
 )
-
-// KubeadmYamlPath is the path to the kubeadm configuration
-var KubeadmYamlPath = path.Join(vmpath.GuestEphemeralDir, "kubeadm.yaml")
 
 const (
 	// KubeletServiceFile is the file for the systemd kubelet.service
@@ -49,12 +44,12 @@ func CopyFiles(runner command.Runner, files []assets.CopyableFile) error {
 	}
 	args := append([]string{"mkdir", "-p"}, dirs...)
 	if _, err := runner.RunCmd(exec.Command("sudo", args...)); err != nil {
-		return errors.Wrap(err, "mkdir")
+		return fmt.Errorf("mkdir: %w", err)
 	}
 
 	for _, f := range files {
 		if err := runner.Copy(f); err != nil {
-			return errors.Wrapf(err, "copy")
+			return fmt.Errorf("copy: %w", err)
 		}
 	}
 	return nil

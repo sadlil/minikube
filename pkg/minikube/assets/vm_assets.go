@@ -20,13 +20,16 @@ import (
 	"bytes"
 	"embed"
 	"fmt"
-	"html/template"
 	"io"
 	"os"
 	"path"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"text/template"
 	"time"
 
-	"github.com/pkg/errors"
+	"errors"
 
 	"k8s.io/klog/v2"
 )
@@ -34,18 +37,74 @@ import (
 // MemorySource is the source name used for in-memory copies
 const MemorySource = "memory"
 
-// CopyableFile is something that can be copied
-type CopyableFile interface {
+// ReadableFile is something that can be read
+type ReadableFile interface {
 	io.Reader
 	GetLength() int
 	GetSourcePath() string
 
-	GetTargetDir() string
-	GetTargetName() string
 	GetPermissions() string
 	GetModTime() (time.Time, error)
 	Seek(int64, int) (int64, error)
 	Close() error
+}
+
+// CopyableFile is something that can be copied
+type CopyableFile interface {
+	ReadableFile
+
+	io.Writer
+	SetLength(int)
+	GetTargetPath() string
+	GetTargetDir() string
+	GetTargetName() string
+}
+
+type writeFn func(d []byte) (n int, err error)
+
+// BaseCopyableFile is something that can be copied and written
+type BaseCopyableFile struct {
+	ReadableFile
+
+	writer     writeFn
+	length     int
+	targetDir  string
+	targetName string
+}
+
+// Write is for write something into the file
+func (r *BaseCopyableFile) Write(d []byte) (n int, err error) {
+	return r.writer(d)
+}
+
+// SetLength is for setting the length
+func (r *BaseCopyableFile) SetLength(length int) {
+	r.length = length
+}
+
+// GetTargetPath returns target path
+func (r *BaseCopyableFile) GetTargetPath() string {
+	return filepath.Join(r.GetTargetDir(), r.GetTargetName())
+}
+
+// GetTargetDir returns target dir
+func (r *BaseCopyableFile) GetTargetDir() string {
+	return r.targetDir
+}
+
+// GetTargetName returns target name
+func (r *BaseCopyableFile) GetTargetName() string {
+	return r.targetName
+}
+
+// NewBaseCopyableFile creates a new instance of BaseCopyableFile
+func NewBaseCopyableFile(source ReadableFile, writer writeFn, targetDir, targetName string) *BaseCopyableFile {
+	return &BaseCopyableFile{
+		ReadableFile: source,
+		writer:       writer,
+		targetDir:    targetDir,
+		targetName:   targetName,
+	}
 }
 
 // BaseAsset is the base asset class
@@ -60,6 +119,11 @@ type BaseAsset struct {
 // GetSourcePath returns asset name
 func (b *BaseAsset) GetSourcePath() string {
 	return b.SourcePath
+}
+
+// GetTargetPath returns target path
+func (b *BaseAsset) GetTargetPath() string {
+	return path.Join(b.GetTargetDir(), b.GetTargetName())
 }
 
 // GetTargetDir returns target dir
@@ -86,6 +150,7 @@ func (b *BaseAsset) GetModTime() (time.Time, error) {
 type FileAsset struct {
 	BaseAsset
 	reader io.ReadSeeker
+	writer io.Writer
 	file   *os.File // Optional pointer to close file through FileAsset.Close()
 }
 
@@ -100,7 +165,7 @@ func NewFileAsset(src, targetDir, targetName, permissions string) (*FileAsset, e
 
 	info, err := os.Stat(src)
 	if err != nil {
-		return nil, errors.Wrapf(err, "stat")
+		return nil, fmt.Errorf("stat: %w", err)
 	}
 
 	if info.Size() == 0 {
@@ -109,7 +174,7 @@ func NewFileAsset(src, targetDir, targetName, permissions string) (*FileAsset, e
 
 	f, err := os.Open(src)
 	if err != nil {
-		return nil, errors.Wrap(err, "open")
+		return nil, fmt.Errorf("open: %w", err)
 	}
 
 	return &FileAsset{
@@ -134,6 +199,14 @@ func (f *FileAsset) GetLength() (flen int) {
 	return int(fi.Size())
 }
 
+// SetLength sets the file length
+func (f *FileAsset) SetLength(flen int) {
+	err := os.Truncate(f.SourcePath, int64(flen))
+	if err != nil {
+		klog.Errorf("truncate(%q) failed: %v", f.SourcePath, err)
+	}
+}
+
 // GetModTime returns modification time of the file
 func (f *FileAsset) GetModTime() (time.Time, error) {
 	fi, err := os.Stat(f.SourcePath)
@@ -150,6 +223,23 @@ func (f *FileAsset) Read(p []byte) (int, error) {
 		return 0, errors.New("Error attempting FileAsset.Read, FileAsset.reader uninitialized")
 	}
 	return f.reader.Read(p)
+}
+
+// Write writes the asset
+func (f *FileAsset) Write(p []byte) (int, error) {
+	if f.writer == nil {
+		f.file.Close()
+		perms, err := strconv.ParseUint(f.Permissions, 8, 32)
+		if err != nil || perms > 07777 {
+			return 0, err
+		}
+		f.file, err = os.OpenFile(f.SourcePath, os.O_RDWR|os.O_CREATE, os.FileMode(perms))
+		if err != nil {
+			return 0, err
+		}
+		f.writer = io.Writer(f.file)
+	}
+	return f.writer.Write(p)
 }
 
 // Seek resets the reader to offset
@@ -177,9 +267,21 @@ func (m *MemoryAsset) GetLength() int {
 	return m.length
 }
 
+// SetLength returns length
+func (m *MemoryAsset) SetLength(length int) {
+	m.length = length
+}
+
 // Read reads the asset
 func (m *MemoryAsset) Read(p []byte) (int, error) {
 	return m.reader.Read(p)
+}
+
+// Writer writes the asset
+func (m *MemoryAsset) Write(p []byte) (int, error) {
+	m.length = len(p)
+	m.reader = bytes.NewReader(p)
+	return len(p), nil
 }
 
 // Seek resets the reader to offset
@@ -252,17 +354,19 @@ func defaultValue(defValue string, val interface{}) string {
 }
 
 func (m *BinAsset) loadData() error {
-	contents, err := m.FS.ReadFile(m.SourcePath)
+	contents, err := m.ReadFile(m.SourcePath)
 	if err != nil {
 		return err
 	}
 
-	tpl, err := template.New(m.SourcePath).Funcs(template.FuncMap{"default": defaultValue}).Parse(string(contents))
-	if err != nil {
-		return err
-	}
+	if strings.HasSuffix(m.SourcePath, ".tmpl") {
+		tpl, err := template.New(m.SourcePath).Funcs(template.FuncMap{"default": defaultValue}).Parse(string(contents))
+		if err != nil {
+			return err
+		}
 
-	m.template = tpl
+		m.template = tpl
+	}
 
 	m.length = len(contents)
 	m.reader = bytes.NewReader(contents)
@@ -281,7 +385,7 @@ func (m *BinAsset) IsTemplate() bool {
 // Evaluate evaluates the template to a new asset
 func (m *BinAsset) Evaluate(data interface{}) (*MemoryAsset, error) {
 	if !m.IsTemplate() {
-		return nil, errors.Errorf("the asset %s is not a template", m.SourcePath)
+		return nil, fmt.Errorf("the asset %s is not a template", m.SourcePath)
 
 	}
 
@@ -298,12 +402,24 @@ func (m *BinAsset) GetLength() int {
 	return m.length
 }
 
+// SetLength sets length
+func (m *BinAsset) SetLength(length int) {
+	m.length = length
+}
+
 // Read reads the asset
 func (m *BinAsset) Read(p []byte) (int, error) {
 	if m.GetLength() == 0 {
-		return 0, fmt.Errorf("attempted read from a 0 length asset")
+		return 0, errors.New("attempted read from a 0 length asset")
 	}
 	return m.reader.Read(p)
+}
+
+// Write writes the asset
+func (m *BinAsset) Write(p []byte) (int, error) {
+	m.length = len(p)
+	m.reader = bytes.NewReader(p)
+	return len(p), nil
 }
 
 // Seek resets the reader to offset

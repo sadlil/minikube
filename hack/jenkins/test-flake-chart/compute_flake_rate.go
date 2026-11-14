@@ -58,13 +58,14 @@ func main() {
 }
 
 // One entry of a test run.
-// Example: TestEntry {
-//	 name: "TestFunctional/parallel/LogsCmd",
-//   environment: "Docker_Linux",
-//	 date: time.Now,
-//   status: "Passed",
-//   duration: 0.1,
-// }
+//
+//	Example: TestEntry {
+//		 name: "TestFunctional/parallel/LogsCmd",
+//	  environment: "Docker_Linux",
+//		 date: time.Now,
+//	  status: "Passed",
+//	  duration: 0.1,
+//	}
 type testEntry struct {
 	name        string
 	environment string
@@ -73,7 +74,7 @@ type testEntry struct {
 	duration    float32
 }
 
-// A map with keys of (environment, test_name) to values of slcies of TestEntry.
+// A map with keys of (environment, test_name) to values of slices of TestEntry.
 type splitEntryMap map[string]map[string][]testEntry
 
 // Reads CSV `file` and consumes each line to be a single TestEntry.
@@ -105,7 +106,7 @@ func readData(file io.Reader) []testEntry {
 			}
 		}
 		if len(fields) != 9 {
-			fmt.Printf("Found line with wrong number of columns. Expectd 9, but got %d - skipping\n", len(fields))
+			fmt.Printf("Found line with wrong number of columns. Expected 9, but got %d - skipping\n", len(fields))
 			continue
 		}
 		previousLine = fields

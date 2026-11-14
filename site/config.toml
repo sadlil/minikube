@@ -15,7 +15,7 @@ defaultContentLanguageInSubdir = false
 # Useful when translating.
 enableMissingTranslationPlaceholders = true
 
-disableKinds = ["taxonomy", "taxonomyTerm"]
+disableKinds = ["taxonomy"]
 
 # Highlighting config
 pygmentsCodeFences = true
@@ -28,6 +28,11 @@ pygmentsStyle = "tango"
 
  # First one is picked as the Twitter card image if not set on page.
  #images = ["images/project-illustration.png"]
+
+# Hugo >= 0.162.0 blocks text/html content files by default.
+# Our site uses .html content files (landing page, leaderboards), so allow them.
+[security]
+allowContent = ['.*']
 
 [markup]
   [markup.highlight]
@@ -59,18 +64,21 @@ anchor = "smart"
 [services]
 [services.googleAnalytics]
 # Comment out the next line to disable GA tracking. Also disables the feature described in [params.ui.feedback].
-#id = "UA-00000000-0"
+id = "G-JPP6RFM2BP"
 
 # Language configuration
 [languages]
 [languages.en]
 title = "minikube"
-description = "minikube is local Kubernetes"
 languageName = "English"
+# Hugo >= 0.158.0 uses 'label' instead of 'languageName'
+label = "English"
 weight = 1
+[languages.en.params]
+description = "minikube is local Kubernetes"
 
 [params]
-copyright = "The Kubernetes Authors -- "
+copyright = "The Kubernetes Authors."
 
 privacy_policy = ""
 
@@ -82,6 +90,8 @@ version_menu = "Releases"
 github_repo = "https://github.com/kubernetes/minikube"
 # An optional link to a related project repo. For example, the sibling repository where your product code lives.
 github_project_repo = ""
+# New versions of Docsy default to main, change it to master
+github_branch = "master"
 
 # Specify a value here if your content directory is not in your repo's root directory
 github_subdir = "site"
@@ -123,11 +133,12 @@ no = 'Sorry to hear that. Please <a href="https://github.com/kubernetes/minikube
 	url = "https://kubernetes.slack.com/messages/C1F5CT6Q1"
 	icon = "fab fa-slack"
     desc = "Chat with other minikube users and developers"
+
 [[params.links.user]]
-	name = "minikube-users mailing list"
-	url = "https://groups.google.com/forum/#!forum/minikube-users"
-	icon = "fas fa-envelope"
-	desc = "Interact with the minikube users here"
+	name = "Slack Invitation"
+	url = "https://communityinviter.com/apps/kubernetes/community"
+	icon = "fab fa-slack"
+    desc = "Use this invitation link to join Kubernetes Slack workspace"
 
 [[params.links.user]]
 	name = "twitter"
@@ -155,7 +166,7 @@ no = 'Sorry to hear that. Please <a href="https://github.com/kubernetes/minikube
 [[params.links.developer]]
 	name = "Project Roadmap"
 	url = "https://minikube.sigs.k8s.io/docs/contrib/roadmap/"
-	icon = "fas fa-external-link-alt"
+	icon = "fas fa-map"
 	desc = "Check out the project roadmap"
 
 # minikube meetings

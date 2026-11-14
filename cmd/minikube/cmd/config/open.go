@@ -21,6 +21,7 @@ import (
 	"text/template"
 
 	"github.com/spf13/cobra"
+	"k8s.io/minikube/cmd/minikube/cmd/flags"
 	"k8s.io/minikube/pkg/minikube/assets"
 	"k8s.io/minikube/pkg/minikube/browser"
 	"k8s.io/minikube/pkg/minikube/exit"
@@ -40,27 +41,29 @@ var (
 	interval          int
 )
 
-const defaultAddonsFormatTemplate = "http://{{.IP}}:{{.Port}}"
+const defaultAddonsFormatTemplate = "http://{{.IP}}:{{.Port}}" //nolint:revive
 
 var addonsOpenCmd = &cobra.Command{
 	Use:   "open ADDON_NAME",
 	Short: "Opens the addon w/ADDON_NAME within minikube (example: minikube addons open dashboard). For a list of available addons use: minikube addons list ",
 	Long:  "Opens the addon w/ADDON_NAME within minikube (example: minikube addons open dashboard). For a list of available addons use: minikube addons list ",
-	PreRun: func(cmd *cobra.Command, args []string) {
+	PreRun: func(_ *cobra.Command, _ []string) {
 		t, err := template.New("addonsURL").Parse(addonsURLFormat)
 		if err != nil {
 			exit.Message(reason.Usage, "The value passed to --format is invalid: {{.error}}", out.V{"error": err})
 		}
 		addonsURLTemplate = t
 	},
-	Run: func(cmd *cobra.Command, args []string) {
+	Run: func(_ *cobra.Command, args []string) {
 		if len(args) != 1 {
 			exit.Message(reason.Usage, "usage: minikube addons open ADDON_NAME")
 		}
+
+		options := flags.CommandOptions()
 		addonName := args[0]
 
 		cname := ClusterFlagValue()
-		co := mustload.Healthy(cname)
+		co := mustload.Healthy(cname, options)
 
 		addon, ok := assets.Addons[addonName] // validate addon input
 		if !ok {
@@ -88,7 +91,7 @@ minikube addons enable {{.name}}`, out.V{"name": addonName})
 You can add one by annotating a service with the label {{.labelName}}:{{.addonName}}`, out.V{"labelName": key, "addonName": addonName})
 		}
 		for i := range serviceList.Items {
-			svc := serviceList.Items[i].ObjectMeta.Name
+			svc := serviceList.Items[i].Name
 			var urlString []string
 
 			if urlString, err = service.WaitForService(co.API, co.Config.Name, namespace, svc, addonsURLTemplate, addonsURLMode, https, wait, interval); err != nil {
@@ -97,10 +100,13 @@ You can add one by annotating a service with the label {{.labelName}}:{{.addonNa
 
 			if len(urlString) != 0 {
 				out.Styled(style.Celebrate, "Opening Kubernetes service  {{.namespace_name}}/{{.service_name}} in default browser...", out.V{"namespace_name": namespace, "service_name": svc})
-				for _, url := range urlString {
-					if err := browser.OpenURL(url); err != nil {
-						exit.Error(reason.HostBrowser, fmt.Sprintf("browser failed to open url %s", url), err)
-					}
+				// Open only the first URL. Opening multiple browser tabs is
+				// never what a user wants — if a service provides a web page,
+				// there is a single relevant page. We assume the first port is
+				// the right one. This works with current addons but may need
+				// smarter selection (e.g. a port hint) for future addons.
+				if err := browser.OpenURL(urlString[0]); err != nil {
+					exit.Error(reason.HostBrowser, fmt.Sprintf("browser failed to open url %s", urlString[0]), err)
 				}
 			}
 		}

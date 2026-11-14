@@ -1,0 +1,53 @@
+name: Português (Brasil)
+description: Reportar um problema
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: O que aconteceu?
+      description: |
+        Dica: Adicione a flag "--alsologtostderr" na linha de comando para obter mais logs.
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Anexe o arquivo de log
+      description: |
+        Dica: Execute `minikube logs --file=log.txt` e depois arraste e solte o arquivo `log.txt` no navegador.
+    validations:
+      required: true
+  - type: dropdown
+    id: operating-system
+    attributes:
+      label: Sistema Operacional
+      description: Qual é o seu sistema operacional?
+      options:
+        - macOS (Default)
+        - Windows
+        - Ubuntu
+        - Redhat/Fedora
+        - Other
+    validations:
+      required: false
+  - type: dropdown
+    id: driver
+    attributes:
+      label: Driver
+      description: Qual driver você usa?
+      options:
+        - N/A
+        - Docker
+        - Podman
+        - Hyper-V
+        - KVM2
+        - VirtualBox
+        - None (Baremetal)
+        - SSH
+        - VMware
+        - Parallels
+        - QEMU
+        - vfkit
+        - krunkit
+    validations:
+      required: false

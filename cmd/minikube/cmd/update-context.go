@@ -18,6 +18,7 @@ package cmd
 
 import (
 	"github.com/spf13/cobra"
+	"k8s.io/minikube/cmd/minikube/cmd/flags"
 	"k8s.io/minikube/pkg/minikube/exit"
 	"k8s.io/minikube/pkg/minikube/kubeconfig"
 	"k8s.io/minikube/pkg/minikube/mustload"
@@ -32,9 +33,10 @@ var updateContextCmd = &cobra.Command{
 	Short: "Update kubeconfig in case of an IP or port change",
 	Long: `Retrieves the IP address of the running cluster, checks it
 			with IP in kubeconfig, and corrects kubeconfig if incorrect.`,
-	Run: func(cmd *cobra.Command, args []string) {
+	Run: func(_ *cobra.Command, _ []string) {
+		options := flags.CommandOptions()
 		cname := ClusterFlagValue()
-		co := mustload.Running(cname)
+		co := mustload.Running(cname, options)
 		//	cluster extension metada for kubeconfig
 
 		updated, err := kubeconfig.UpdateEndpoint(cname, co.CP.Hostname, co.CP.Port, kubeconfig.PathFromEnv(), kubeconfig.NewExtension())

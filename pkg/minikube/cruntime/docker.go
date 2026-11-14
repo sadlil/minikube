@@ -17,28 +17,38 @@ limitations under the License.
 package cruntime
 
 import (
+	"bytes"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path"
 	"strings"
+	"text/template"
 	"time"
 
 	"github.com/blang/semver/v4"
-	"github.com/pkg/errors"
+	units "github.com/docker/go-units"
 	"k8s.io/klog/v2"
 	"k8s.io/minikube/pkg/minikube/assets"
 	"k8s.io/minikube/pkg/minikube/bootstrapper/images"
 	"k8s.io/minikube/pkg/minikube/command"
 	"k8s.io/minikube/pkg/minikube/config"
+	"k8s.io/minikube/pkg/minikube/constants"
 	"k8s.io/minikube/pkg/minikube/docker"
 	"k8s.io/minikube/pkg/minikube/download"
+	"k8s.io/minikube/pkg/minikube/image"
 	"k8s.io/minikube/pkg/minikube/style"
 	"k8s.io/minikube/pkg/minikube/sysinit"
+	"k8s.io/minikube/pkg/util/retry"
 )
 
 // KubernetesContainerPrefix is the prefix of each Kubernetes container
 const KubernetesContainerPrefix = "k8s_"
+
+const InternalDockerCRISocket = "/var/run/dockershim.sock"
+const ExternalDockerCRISocket = "/var/run/cri-dockerd.sock"
 
 // ErrISOFeature is the error returned when disk image is missing features
 type ErrISOFeature struct {
@@ -60,10 +70,13 @@ func (e *ErrISOFeature) Error() string {
 type Docker struct {
 	Socket            string
 	Runner            CommandRunner
+	NetworkPlugin     string
 	ImageRepository   string
 	KubernetesVersion semver.Version
 	Init              sysinit.Manager
 	UseCRI            bool
+	CRIService        string
+	GPUs              string
 }
 
 // Name is a human readable name for Docker
@@ -92,11 +105,23 @@ func (r *Docker) SocketPath() string {
 	if r.Socket != "" {
 		return r.Socket
 	}
-	return "/var/run/dockershim.sock"
+	return InternalDockerCRISocket
 }
 
 // Available returns an error if it is not possible to use this runtime on a host
 func (r *Docker) Available() error {
+	// If Kubernetes version >= 1.24, require both cri-dockerd and dockerd.
+	if r.KubernetesVersion.GTE(semver.Version{Major: 1, Minor: 24}) {
+		if _, err := exec.LookPath("cri-dockerd"); err != nil {
+			return err
+		}
+		if _, err := exec.LookPath("dockerd"); err != nil {
+			return err
+		}
+	}
+	if err := checkCNIPlugins(r.KubernetesVersion); err != nil {
+		return err
+	}
 	_, err := exec.LookPath("docker")
 	return err
 }
@@ -107,9 +132,17 @@ func (r *Docker) Active() bool {
 }
 
 // Enable idempotently enables Docker on a host
-func (r *Docker) Enable(disOthers, forceSystemd bool) error {
-	containerdWasActive := r.Init.Active("containerd")
-
+func (r *Docker) Enable(disOthers bool, cgroupDriver string, inUserNamespace bool) error {
+	if inUserNamespace {
+		if err := CheckKernelCompatibility(r.Runner, 5, 11); err != nil {
+			// For using overlayfs
+			return fmt.Errorf("kernel >= 5.11 is required for rootless mode: %w", err)
+		}
+		if err := CheckKernelCompatibility(r.Runner, 5, 13); err != nil {
+			// For avoiding SELinux error with overlayfs
+			klog.Warningf("kernel >= 5.13 is recommended for rootless mode %v", err)
+		}
+	}
 	if disOthers {
 		if err := disableOthers(r, r.Runner); err != nil {
 			klog.Warningf("disableOthers: %v", err)
@@ -117,6 +150,9 @@ func (r *Docker) Enable(disOthers, forceSystemd bool) error {
 	}
 
 	if err := populateCRIConfig(r.Runner, r.SocketPath()); err != nil {
+		return err
+	}
+	if err := generateCRIDockerdConfig(r.Runner, r.ImageRepository, r.KubernetesVersion, r.NetworkPlugin); err != nil {
 		return err
 	}
 
@@ -128,44 +164,89 @@ func (r *Docker) Enable(disOthers, forceSystemd bool) error {
 		klog.ErrorS(err, "Failed to enable", "service", "docker.socket")
 	}
 
-	if forceSystemd {
-		if err := r.forceSystemd(); err != nil {
+	if err := r.configureDocker(cgroupDriver); err != nil {
+		return err
+	}
+
+	if err := r.restartServiceWithExpoRetry("docker"); err != nil {
+		return err
+	}
+
+	// restart cri-docker
+	// avoid error: "Exiting due to RUNTIME_ENABLE: Failed to enable container runtime: sudo systemctl restart cri-docker: exit status 1"
+	// => journalctl: "cri-docker.socket: Socket service cri-docker.service already active, refusing."
+	if r.CRIService != "" {
+		socket := "cri-docker.socket"
+		service := "cri-docker.service"
+		// allow "native" socket activation:
+		// prevent active socket to reactivate service, that we're going to stop next - 'systemctl status cri-docker.socket': "Triggers: cri-docker.service"
+		// intentionally continue on any error
+		if r.Init.Active(socket) {
+			_ = r.Init.Stop(socket)
+		}
+		if r.Init.Active(service) {
+			_ = r.Init.Stop(service)
+		}
+
+		if err := r.Init.Unmask(socket); err != nil {
 			return err
 		}
-		return r.Init.Restart("docker")
+		if err := r.Init.Enable(socket); err != nil {
+			return err
+		}
+		if err := r.Init.Restart(socket); err != nil {
+			return err
+		}
+
+		if err := r.restartServiceWithExpoRetry(service); err != nil {
+			return err
+		}
 	}
 
-	if containerdWasActive && !dockerBoundToContainerd(r.Runner) {
-		// Make sure to use the internal containerd
-		return r.Init.Restart("docker")
-	}
-
-	return r.Init.Start("docker")
+	return nil
 }
 
 // Restart restarts Docker on a host
 func (r *Docker) Restart() error {
+	_ = r.Init.ResetFailed("docker")
 	return r.Init.Restart("docker")
 }
 
 // Disable idempotently disables Docker on a host
 func (r *Docker) Disable() error {
+	// even if r.CRIService is undefined, it might still be available, so try to disable it and just warn then fallthrough if unsuccessful
+	klog.Info("disabling cri-docker service (if available) ...")
+	criSocket := "cri-docker.socket"
+	criService := "cri-docker.service"
+	if err := r.Init.ForceStop(criSocket); err != nil {
+		klog.Warningf("Failed to stop socket %q (might be ok): %v", criSocket, err)
+	}
+	if err := r.Init.ForceStop(criService); err != nil {
+		klog.Warningf("Failed to stop service %q (might be ok): %v", criService, err)
+	}
+	if err := r.Init.Disable(criSocket); err != nil {
+		klog.Warningf("Failed to disable socket %q (might be ok): %v", criSocket, err)
+	}
+	if err := r.Init.Mask(criService); err != nil {
+		klog.Warningf("Failed to mask service %q (might be ok): %v", criService, err)
+	}
+
 	klog.Info("disabling docker service ...")
 	// because #10373
 	if err := r.Init.ForceStop("docker.socket"); err != nil {
-		klog.ErrorS(err, "Failed to stop", "service", "docker.socket")
+		klog.ErrorS(err, "Failed to stop", "socket", "docker.socket")
 	}
 	if err := r.Init.ForceStop("docker.service"); err != nil {
 		klog.ErrorS(err, "Failed to stop", "service", "docker.service")
 		return err
 	}
 	if err := r.Init.Disable("docker.socket"); err != nil {
-		klog.ErrorS(err, "Failed to disable", "service", "docker.socket")
+		klog.ErrorS(err, "Failed to disable", "socket", "docker.socket")
 	}
 	return r.Init.Mask("docker.service")
 }
 
-// ImageExists checks if an image exists
+// ImageExists checks if image exists based on image name and optionally image sha
 func (r *Docker) ImageExists(name string, sha string) bool {
 	// expected output looks like [SHA_ALGO:SHA]
 	c := exec.Command("docker", "image", "inspect", "--format", "{{.Id}}", name)
@@ -173,37 +254,61 @@ func (r *Docker) ImageExists(name string, sha string) bool {
 	if err != nil {
 		return false
 	}
-	if !strings.Contains(rr.Output(), sha) {
+	if sha != "" && !strings.Contains(rr.Output(), sha) {
 		return false
 	}
 	return true
 }
 
 // ListImages returns a list of images managed by this container runtime
-func (r *Docker) ListImages(ListImagesOptions) ([]string, error) {
-	c := exec.Command("docker", "images", "--format", "{{.Repository}}:{{.Tag}}")
+func (r *Docker) ListImages(ListImagesOptions) ([]ListImage, error) {
+	if r.UseCRI {
+		return listCRIImages(r.Runner)
+	}
+	c := exec.Command("docker", "images", "--no-trunc", "--format", "{{json .}}")
 	rr, err := r.Runner.RunCmd(c)
 	if err != nil {
-		return nil, errors.Wrapf(err, "docker images")
+		return nil, fmt.Errorf("docker images: %w", err)
 	}
-	short := strings.Split(rr.Stdout.String(), "\n")
-	imgs := []string{}
-	for _, img := range short {
+	type dockerImage struct {
+		ID         string `json:"ID"`
+		Repository string `json:"Repository"`
+		Tag        string `json:"Tag"`
+		Size       string `json:"Size"`
+	}
+	imgs := strings.Split(rr.Stdout.String(), "\n")
+	result := []ListImage{}
+	for _, img := range imgs {
 		if img == "" {
 			continue
 		}
-		img = addDockerIO(img)
-		imgs = append(imgs, img)
+
+		var jsonImage dockerImage
+		if err := json.Unmarshal([]byte(img), &jsonImage); err != nil {
+			return nil, fmt.Errorf("Image convert problem: %w", err)
+		}
+		size, err := units.FromHumanSize(jsonImage.Size)
+		if err != nil {
+			return nil, fmt.Errorf("Image size convert problem: %w", err)
+		}
+
+		repoTag := fmt.Sprintf("%s:%s", jsonImage.Repository, jsonImage.Tag)
+		result = append(result, ListImage{
+			ID:          strings.TrimPrefix(jsonImage.ID, "sha256:"),
+			RepoDigests: []string{},
+			RepoTags:    []string{AddDockerIO(repoTag)},
+			Size:        fmt.Sprintf("%d", size),
+		})
 	}
-	return imgs, nil
+	return result, nil
 }
 
 // LoadImage loads an image into this runtime
-func (r *Docker) LoadImage(path string) error {
-	klog.Infof("Loading image: %s", path)
-	c := exec.Command("docker", "load", "-i", path)
+func (r *Docker) LoadImage(imgPath string) error {
+	klog.Infof("Loading image: %s", imgPath)
+	c := exec.Command("/bin/bash", "-c", fmt.Sprintf("sudo cat %s | docker load", imgPath))
 	if _, err := r.Runner.RunCmd(c); err != nil {
-		return errors.Wrap(err, "loadimage docker.")
+		return fmt.Errorf("loadimage docker: %w", err)
 	}
 	return nil
 }
@@ -216,17 +321,17 @@ func (r *Docker) PullImage(name string) error {
 	}
 	c := exec.Command("docker", "pull", name)
 	if _, err := r.Runner.RunCmd(c); err != nil {
-		return errors.Wrap(err, "pull image docker.")
+		return fmt.Errorf("pull image docker: %w", err)
 	}
 	return nil
 }
 
 // SaveImage saves an image from this runtime
-func (r *Docker) SaveImage(name string, path string) error {
-	klog.Infof("Saving image %s: %s", name, path)
-	c := exec.Command("docker", "save", name, "-o", path)
+func (r *Docker) SaveImage(name string, imagePath string) error {
+	klog.Infof("Saving image %s: %s", name, imagePath)
+	c := exec.Command("/bin/bash", "-c", fmt.Sprintf("docker save '%s' | sudo tee %s >/dev/null", name, imagePath))
 	if _, err := r.Runner.RunCmd(c); err != nil {
-		return errors.Wrap(err, "saveimage docker.")
+		return fmt.Errorf("saveimage docker: %w", err)
 	}
 	return nil
 }
@@ -235,11 +340,21 @@ func (r *Docker) SaveImage(name string, path string) error {
 func (r *Docker) RemoveImage(name string) error {
 	klog.Infof("Removing image: %s", name)
 	if r.UseCRI {
-		return removeCRIImage(r.Runner, name)
+		return removeCRIImage(r.Runner, name, false)
 	}
 	c := exec.Command("docker", "rmi", name)
 	if _, err := r.Runner.RunCmd(c); err != nil {
-		return errors.Wrap(err, "remove image docker.")
+		return fmt.Errorf("remove image docker: %w", err)
+	}
+	return nil
+}
+
+// TagImage tags an image in this runtime
+func (r *Docker) TagImage(source string, target string) error {
+	klog.Infof("Tagging image %s: %s", source, target)
+	c := exec.Command("docker", "tag", source, target)
+	if _, err := r.Runner.RunCmd(c); err != nil {
+		return fmt.Errorf("tag image docker: %w", err)
 	}
 	return nil
 }
@@ -265,15 +380,25 @@ func (r *Docker) BuildImage(src string, file string, tag string, push bool, env 
 	c.Stdout = os.Stdout
 	c.Stderr = os.Stderr
 	if _, err := r.Runner.RunCmd(c); err != nil {
-		return errors.Wrap(err, "buildimage docker.")
+		return fmt.Errorf("buildimage docker: %w", err)
 	}
 	if tag != "" && push {
 		c := exec.Command("docker", "push", tag)
 		c.Stdout = os.Stdout
 		c.Stderr = os.Stderr
 		if _, err := r.Runner.RunCmd(c); err != nil {
-			return errors.Wrap(err, "pushimage docker.")
+			return fmt.Errorf("pushimage docker: %w", err)
 		}
+	}
+	return nil
+}
+
+// PushImage pushes an image
+func (r *Docker) PushImage(name string) error {
+	klog.Infof("Pushing image: %s", name)
+	c := exec.Command("docker", "push", name)
+	if _, err := r.Runner.RunCmd(c); err != nil {
+		return fmt.Errorf("push image docker: %w", err)
 	}
 	return nil
 }
@@ -292,12 +417,7 @@ func (r *Docker) CGroupDriver() (string, error) {
 // KubeletOptions returns kubelet options for a runtime.
 func (r *Docker) KubeletOptions() map[string]string {
 	if r.UseCRI {
-		return map[string]string{
-			"container-runtime":          "remote",
-			"container-runtime-endpoint": r.SocketPath(),
-			"image-service-endpoint":     r.SocketPath(),
-			"runtime-request-timeout":    "15m",
-		}
+		return kubeletCRIOptions(r, r.KubernetesVersion)
 	}
 	return map[string]string{
 		"container-runtime": "docker",
@@ -328,10 +448,10 @@ func (r *Docker) ListContainers(o ListContainersOptions) ([]string, error) {
 	args = append(args, fmt.Sprintf("--filter=name=%s", nameFilter), "--format={{.ID}}")
 	rr, err := r.Runner.RunCmd(exec.Command("docker", args...))
 	if err != nil {
-		return nil, errors.Wrapf(err, "docker")
+		return nil, fmt.Errorf("docker: %w", err)
 	}
 	var ids []string
-	for _, line := range strings.Split(rr.Stdout.String(), "\n") {
+	for line := range strings.SplitSeq(rr.Stdout.String(), "\n") {
 		if line != "" {
 			ids = append(ids, line)
 		}
@@ -351,7 +471,7 @@ func (r *Docker) KillContainers(ids []string) error {
 	args := append([]string{"rm", "-f"}, ids...)
 	c := exec.Command("docker", args...)
 	if _, err := r.Runner.RunCmd(c); err != nil {
-		return errors.Wrap(err, "Killing containers docker.")
+		return fmt.Errorf("killing containers docker: %w", err)
 	}
 	return nil
 }
@@ -368,7 +488,7 @@ func (r *Docker) StopContainers(ids []string) error {
 	args := append([]string{"stop"}, ids...)
 	c := exec.Command("docker", args...)
 	if _, err := r.Runner.RunCmd(c); err != nil {
-		return errors.Wrap(err, "docker")
+		return fmt.Errorf("docker: %w", err)
 	}
 	return nil
 }
@@ -385,7 +505,7 @@ func (r *Docker) PauseContainers(ids []string) error {
 	args := append([]string{"pause"}, ids...)
 	c := exec.Command("docker", args...)
 	if _, err := r.Runner.RunCmd(c); err != nil {
-		return errors.Wrap(err, "docker")
+		return fmt.Errorf("docker: %w", err)
 	}
 	return nil
 }
@@ -402,20 +522,20 @@ func (r *Docker) UnpauseContainers(ids []string) error {
 	args := append([]string{"unpause"}, ids...)
 	c := exec.Command("docker", args...)
 	if _, err := r.Runner.RunCmd(c); err != nil {
-		return errors.Wrap(err, "docker")
+		return fmt.Errorf("docker: %w", err)
 	}
 	return nil
 }
 
 // ContainerLogCmd returns the command to retrieve the log for a container based on ID
-func (r *Docker) ContainerLogCmd(id string, len int, follow bool) string {
+func (r *Docker) ContainerLogCmd(id string, length int, follow bool) string {
 	if r.UseCRI {
-		return criContainerLogCmd(r.Runner, id, len, follow)
+		return criContainerLogCmd(r.Runner, id, length, follow)
 	}
 	var cmd strings.Builder
 	cmd.WriteString("docker logs ")
-	if len > 0 {
-		cmd.WriteString(fmt.Sprintf("--tail %d ", len))
+	if length > 0 {
+		fmt.Fprintf(&cmd, "--tail %d ", length)
 	}
 	if follow {
 		cmd.WriteString("--follow ")
@@ -426,23 +546,61 @@ func (r *Docker) ContainerLogCmd(id string, len int, follow bool) string {
 }
 
 // SystemLogCmd returns the command to retrieve system logs
-func (r *Docker) SystemLogCmd(len int) string {
-	return fmt.Sprintf("sudo journalctl -u docker -n %d", len)
+func (r *Docker) SystemLogCmd(length int) string {
+	return fmt.Sprintf("sudo journalctl -u docker -u cri-docker -n %d", length)
 }
 
-// ForceSystemd forces the docker daemon to use systemd as cgroup manager
-func (r *Docker) forceSystemd() error {
-	klog.Infof("Forcing docker to use systemd as cgroup manager...")
-	daemonConfig := `{
-"exec-opts": ["native.cgroupdriver=systemd"],
-"log-driver": "json-file",
-"log-opts": {
-	"max-size": "100m"
-},
-"storage-driver": "overlay2"
+type dockerDaemonConfig struct {
+	ExecOpts       []string              `json:"exec-opts"`
+	LogDriver      string                `json:"log-driver"`
+	LogOpts        dockerDaemonLogOpts   `json:"log-opts"`
+	StorageDriver  string                `json:"storage-driver"`
+	DefaultRuntime string                `json:"default-runtime,omitempty"`
+	Runtimes       *dockerDaemonRuntimes `json:"runtimes,omitempty"`
 }
-`
-	ma := assets.NewMemoryAsset([]byte(daemonConfig), "/etc/docker", "daemon.json", "0644")
+type dockerDaemonLogOpts struct {
+	MaxSize string `json:"max-size"`
+}
+type dockerDaemonRuntimes struct {
+	Nvidia struct {
+		Path        string        `json:"path"`
+		RuntimeArgs []interface{} `json:"runtimeArgs"`
+	} `json:"nvidia"`
+}
+
+// configureDocker configures the docker daemon to use driver as cgroup manager
+// ref: https://docs.docker.com/engine/reference/commandline/dockerd/#options-for-the-runtime
+func (r *Docker) configureDocker(driver string) error {
+	if driver == constants.UnknownCgroupDriver {
+		return errors.New("unable to configure docker to use unknown cgroup driver")
+	}
+
+	klog.Infof("configuring docker to use %q as cgroup driver...", driver)
+	daemonConfig := dockerDaemonConfig{
+		ExecOpts:  []string{"native.cgroupdriver=" + driver},
+		LogDriver: "json-file",
+		LogOpts: dockerDaemonLogOpts{
+			MaxSize: "100m",
+		},
+		StorageDriver: "overlay2",
+	}
+
+	switch r.GPUs {
+	case "all", "nvidia", "nvidia.com":
+		assets.Addons["nvidia-device-plugin"].EnableByDefault()
+		daemonConfig.DefaultRuntime = "nvidia"
+		runtimes := &dockerDaemonRuntimes{}
+		runtimes.Nvidia.Path = "/usr/bin/nvidia-container-runtime"
+		daemonConfig.Runtimes = runtimes
+	case "amd":
+		assets.Addons["amd-gpu-device-plugin"].EnableByDefault()
+	}
+
+	daemonConfigBytes, err := json.Marshal(daemonConfig)
+	if err != nil {
+		return err
+	}
+	ma := assets.NewMemoryAsset(daemonConfigBytes, "/etc/docker", "daemon.json", "0644")
 	return r.Runner.Copy(ma)
 }
 
@@ -458,11 +616,11 @@ func (r *Docker) Preload(cc config.ClusterConfig) error {
 	cRuntime := cc.KubernetesConfig.ContainerRuntime
 
 	// If images already exist, return
-	images, err := images.Kubeadm(cc.KubernetesConfig.ImageRepository, k8sVersion)
+	imgs, err := images.Kubeadm(cc.KubernetesConfig.ImageRepository, k8sVersion)
 	if err != nil {
-		return errors.Wrap(err, "getting images")
+		return fmt.Errorf("getting images: %w", err)
 	}
-	if dockerImagesPreloaded(r.Runner, images) {
+	if dockerImagesPreloaded(r.Runner, imgs) {
 		klog.Info("Images already preloaded, skipping extraction")
 		return nil
 	}
@@ -485,7 +643,7 @@ func (r *Docker) Preload(cc config.ClusterConfig) error {
 	// Copy over tarball into host
 	fa, err := assets.NewFileAsset(tarballPath, targetDir, targetName, "0644")
 	if err != nil {
-		return errors.Wrap(err, "getting file asset")
+		return fmt.Errorf("getting file asset: %w", err)
 	}
 	defer func() {
 		if err := fa.Close(); err != nil {
@@ -495,13 +653,13 @@ func (r *Docker) Preload(cc config.ClusterConfig) error {
 
 	t := time.Now()
 	if err := r.Runner.Copy(fa); err != nil {
-		return errors.Wrap(err, "copying file")
+		return fmt.Errorf("copying file: %w", err)
 	}
-	klog.Infof("Took %f seconds to copy over tarball", time.Since(t).Seconds())
+	klog.Infof("duration metric: took %s to copy over tarball", time.Since(t))
 
 	// extract the tarball to /var in the VM
-	if rr, err := r.Runner.RunCmd(exec.Command("sudo", "tar", "-I", "lz4", "-C", "/var", "-xf", dest)); err != nil {
-		return errors.Wrapf(err, "extracting tarball: %s", rr.Output())
+	if rr, err := r.Runner.RunCmd(exec.Command("sudo", "tar", "--xattrs", "--xattrs-include", "security.capability", "-I", "lz4", "-C", "/var", "-xf", dest)); err != nil {
+		return fmt.Errorf("extracting tarball: %s: %w", rr.Output(), err)
 	}
 
 	//  remove the tarball in the VM
@@ -521,22 +679,23 @@ func (r *Docker) Preload(cc config.ClusterConfig) error {
 }
 
 // dockerImagesPreloaded returns true if all images have been preloaded
-func dockerImagesPreloaded(runner command.Runner, images []string) bool {
+func dockerImagesPreloaded(runner command.Runner, imgs []string) bool {
 	rr, err := runner.RunCmd(exec.Command("docker", "images", "--format", "{{.Repository}}:{{.Tag}}"))
 	if err != nil {
+		klog.Warning(err)
 		return false
 	}
 	preloadedImages := map[string]struct{}{}
-	for _, i := range strings.Split(rr.Stdout.String(), "\n") {
-		i = trimDockerIO(i)
+	for i := range strings.SplitSeq(rr.Stdout.String(), "\n") {
+		i = image.TrimDockerIO(i)
 		preloadedImages[i] = struct{}{}
 	}
 
 	klog.Infof("Got preloaded images: %s", rr.Output())
 
 	// Make sure images == imgs
-	for _, i := range images {
-		i = trimDockerIO(i)
+	for _, i := range imgs {
+		i = image.TrimDockerIO(i)
 		if _, ok := preloadedImages[i]; !ok {
 			klog.Infof("%s wasn't preloaded", i)
 			return false
@@ -546,14 +705,22 @@ func dockerImagesPreloaded(runner command.Runner, images []string) bool {
 }
 
 // Add docker.io prefix
-func addDockerIO(name string) string {
+func AddDockerIO(name string) string {
+	return addRegistryPreix(name, "docker.io")
+}
+func addRegistryPreix(name string, prefix string) string {
+	// we separate the image name following this logic
+	// https://pkg.go.dev/github.com/distribution/reference#ParseNormalizedNamed
 	var reg, usr, img string
 	p := strings.SplitN(name, "/", 2)
-	if len(p) > 1 && strings.Contains(p[0], ".") {
+	// containing . means that it is a valid url for registry(e.g. xxx.io)
+	// containing : means it contains some port number (e.g. xxx:5432)
+	// it may also start with localhost, which is also regarded as a valid registry
+	if len(p) > 1 && (strings.ContainsAny(p[0], ".:") || strings.Contains(p[0], "localhost")) {
 		reg = p[0]
 		img = p[1]
 	} else {
-		reg = "docker.io"
+		reg = prefix
 		img = name
 		p = strings.SplitN(img, "/", 2)
 		if len(p) > 1 {
@@ -566,13 +733,6 @@ func addDockerIO(name string) string {
 		return reg + "/" + usr + "/" + img
 	}
 	return reg + "/" + img
-}
-
-// Remove docker.io prefix since it won't be included in images names
-// when we call 'docker images'
-func trimDockerIO(name string) string {
-	name = strings.TrimPrefix(name, "docker.io/")
-	return name
 }
 
 func dockerBoundToContainerd(runner command.Runner) bool {
@@ -591,6 +751,84 @@ func dockerBoundToContainerd(runner command.Runner) bool {
 }
 
 // ImagesPreloaded returns true if all images have been preloaded
-func (r *Docker) ImagesPreloaded(images []string) bool {
-	return dockerImagesPreloaded(r.Runner, images)
+func (r *Docker) ImagesPreloaded(imgs []string) bool {
+	return dockerImagesPreloaded(r.Runner, imgs)
+}
+
+const (
+	CNIBinDir   = "/opt/cni/bin"
+	CNICacheDir = "/var/lib/cni/cache"
+)
+
+func getCriDockerdPath(cr CommandRunner) string {
+	rr, err := cr.RunCmd(exec.Command("which", "cri-dockerd"))
+	if err != nil {
+		return "/usr/bin/cri-dockerd"
+	}
+	return strings.TrimSuffix(rr.Stdout.String(), "\n")
+}
+
+func generateCRIDockerdConfig(cr CommandRunner, imageRepository string, kv semver.Version, networkPlugin string) error {
+
+	pauseImage := images.Pause(kv, imageRepository)
+	// $ cri-dockerd --version
+	// cri-dockerd 0.2.6 (d8accf7)
+	// $ cri-dockerd --help | grep -i cni
+	// --cni-bin-dir string                      A comma-separated list of full paths of directories in which to search for CNI plugin binaries. (default "/opt/cni/bin")
+	// --cni-cache-dir string                    The full path of the directory in which CNI should store cache files. (default "/var/lib/cni/cache")
+	// --cni-conf-dir string                     The full path of the directory in which to search for CNI config files (default "/etc/cni/net.d")
+	// --network-plugin string                   The name of the network plugin to be invoked for various events in kubelet/pod lifecycle. (default "cni")
+	args := " --hairpin-mode=hairpin-veth"
+	// if network plugin is not selected - use default "cni"
+	if networkPlugin == "" {
+		networkPlugin = "cni"
+	}
+	opts := struct {
+		ExecPath       string
+		PauseImage     string
+		NetworkPlugin  string
+		ExtraArguments string
+	}{
+		ExecPath:       getCriDockerdPath(cr),
+		PauseImage:     pauseImage,
+		NetworkPlugin:  networkPlugin,
+		ExtraArguments: args,
+	}
+
+	const CRIDockerServiceConfFile = "/etc/systemd/system/cri-docker.service.d/10-cni.conf"
+	var CRIDockerServiceConfTemplate = template.Must(template.New("criDockerServiceConfTemplate").Parse(`[Service]
+ExecStart=
+ExecStart={{.ExecPath}} --container-runtime-endpoint fd:// --pod-infra-container-image={{.PauseImage}} --network-plugin={{.NetworkPlugin}}{{.ExtraArguments}}`))
+
+	b := bytes.Buffer{}
+	if err := CRIDockerServiceConfTemplate.Execute(&b, opts); err != nil {
+		return fmt.Errorf("failed to execute template: %w", err)
+	}
+	criDockerService := b.Bytes()
+	c := exec.Command("sudo", "mkdir", "-p", path.Dir(CRIDockerServiceConfFile))
+	if _, err := cr.RunCmd(c); err != nil {
+		return fmt.Errorf("failed to create directory: %w", err)
+	}
+	svc := assets.NewMemoryAssetTarget(criDockerService, CRIDockerServiceConfFile, "0644")
+	if err := cr.Copy(svc); err != nil {
+		return fmt.Errorf("failed to copy template: %w", err)
+	}
+	return nil
+}
+
+func (r *Docker) restartServiceWithExpoRetry(service string) error {
+	_ = r.Init.ResetFailed(service)
+	_ = r.Init.Restart(service)
+	// try to restart service if stopped, restart until it works
+	return retry.Expo(
+		func() error {
+			if !r.Init.Active(service) {
+				r.Init.ResetFailed(service)
+				r.Init.Restart(service)
+				return fmt.Errorf("%s not running", service)
+			}
+			return nil
+		},
+		1*time.Second, time.Minute, 5,
+	)
 }

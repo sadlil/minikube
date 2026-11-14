@@ -23,6 +23,7 @@ import (
 	"k8s.io/minikube/pkg/minikube/config"
 	"k8s.io/minikube/pkg/minikube/constants"
 	"k8s.io/minikube/pkg/minikube/cruntime"
+	"k8s.io/minikube/pkg/minikube/run"
 )
 
 // LogOptions are options to be passed to LogCommands
@@ -35,7 +36,9 @@ type LogOptions struct {
 
 // Bootstrapper contains all the methods needed to bootstrap a Kubernetes cluster
 type Bootstrapper interface {
-	StartCluster(config.ClusterConfig) error
+	// LabelAndUntaintNode applies minikube labels to node and removes NoSchedule taints from control-plane nodes.
+	LabelAndUntaintNode(config.ClusterConfig, config.Node) error
+	StartCluster(config.ClusterConfig, *run.CommandOptions) error
 	UpdateCluster(config.ClusterConfig) error
 	DeleteCluster(config.KubernetesConfig) error
 	WaitForNode(config.ClusterConfig, config.Node, time.Duration) error
@@ -44,7 +47,8 @@ type Bootstrapper interface {
 	GenerateToken(config.ClusterConfig) (string, error)
 	// LogCommands returns a map of log type to a command which will display that log.
 	LogCommands(config.ClusterConfig, LogOptions) map[string]string
-	SetupCerts(config.KubernetesConfig, config.Node) error
+	// SetupCerts gets the generated credentials required to talk to the APIServer.
+	SetupCerts(config.ClusterConfig, config.Node, cruntime.CommandRunner) error
 	GetAPIServerStatus(string, int) (string, error)
 }
 
@@ -54,11 +58,11 @@ const (
 )
 
 // GetCachedBinaryList returns the list of binaries
-func GetCachedBinaryList(bootstrapper string) []string {
+func GetCachedBinaryList() []string {
 	return constants.KubernetesReleaseBinaries
 }
 
 // GetCachedImageList returns the list of images for a version
-func GetCachedImageList(imageRepository string, version string, bootstrapper string) ([]string, error) {
+func GetCachedImageList(imageRepository, version string) ([]string, error) {
 	return images.Kubeadm(imageRepository, version)
 }

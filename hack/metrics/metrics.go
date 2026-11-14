@@ -27,11 +27,11 @@ import (
 	"time"
 
 	_ "cloud.google.com/go/storage"
-	"contrib.go.opencensus.io/exporter/stackdriver"
-	"github.com/pkg/errors"
-	"go.opencensus.io/stats"
-	"go.opencensus.io/stats/view"
-	"go.opencensus.io/trace"
+	"errors"
+	mexporter "github.com/GoogleCloudPlatform/opentelemetry-operations-go/exporter/metric"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/metric"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	pkgtrace "k8s.io/minikube/pkg/trace"
 )
 
@@ -41,10 +41,8 @@ const (
 )
 
 var (
-	// The task latency in seconds
-	latencyS = stats.Float64("repl/start_time", "start time in seconds", "s")
-	labels   string
-	tmpFile  string
+	labels  string
+	tmpFile string
 )
 
 func main() {
@@ -67,20 +65,9 @@ func execute() error {
 	}
 	ctx := context.Background()
 	if err := downloadMinikube(ctx, tmpFile); err != nil {
-		return errors.Wrap(err, "downloading minikube")
+		return fmt.Errorf("downloading minikube: %w", err)
 	}
 
-	// Register the view. It is imperative that this step exists,
-	// otherwise recorded metrics will be dropped and never exported.
-	v := &view.View{
-		Name:        customMetricName,
-		Measure:     latencyS,
-		Description: "minikube start time",
-		Aggregation: view.LastValue(),
-	}
-	if err := view.Register(v); err != nil {
-		return errors.Wrap(err, "registering view")
-	}
 	for _, cr := range []string{"docker", "containerd", "crio"} {
 		if err := exportMinikubeStart(ctx, projectID, cr); err != nil {
 			log.Printf("error exporting minikube start data for runtime %v: %v", cr, err)
@@ -90,47 +77,42 @@ func execute() error {
 }
 
 func exportMinikubeStart(ctx context.Context, projectID, containerRuntime string) error {
-	sd, err := getExporter(projectID, containerRuntime)
+	mp, attrs, err := getMeterProvider(projectID, containerRuntime)
 	if err != nil {
-		return errors.Wrap(err, "getting stackdriver exporter")
+		return fmt.Errorf("creating meter provider: %w", err)
 	}
-	// Register it as a trace exporter
-	trace.RegisterExporter(sd)
+	defer func() { _ = mp.Shutdown(ctx) }()
 
-	if err := sd.StartMetricsExporter(); err != nil {
-		return errors.Wrap(err, "starting metric exporter")
+	meter := mp.Meter("minikube")
+	latency, err := meter.Float64Histogram(customMetricName)
+	if err != nil {
+		return fmt.Errorf("creating histogram: %w", err)
 	}
-	// track minikube start time and record it to metrics collector
+
 	st, err := minikubeStartTime(ctx, projectID, tmpFile, containerRuntime)
 	if err != nil {
-		return errors.Wrap(err, "collecting start time")
+		return fmt.Errorf("collecting start time: %w", err)
 	}
 	fmt.Printf("Latency: %f\n", st)
-	stats.Record(ctx, latencyS.M(st))
+	latency.Record(ctx, st, metric.WithAttributes(attrs...))
 	time.Sleep(30 * time.Second)
-	sd.Flush()
-	sd.StopMetricsExporter()
-	trace.UnregisterExporter(sd)
 	return nil
 }
 
-func getExporter(projectID, containerRuntime string) (*stackdriver.Exporter, error) {
-	return stackdriver.NewExporter(stackdriver.Options{
-		ProjectID: projectID,
-		// MetricPrefix helps uniquely identify your metrics.
-		MetricPrefix: "minikube_start",
-		// ReportingInterval sets the frequency of reporting metrics
-		// to stackdriver backend.
-		ReportingInterval:       1 * time.Second,
-		DefaultMonitoringLabels: getLabels(containerRuntime),
-	})
+func getMeterProvider(projectID, containerRuntime string) (*sdkmetric.MeterProvider, []attribute.KeyValue, error) {
+	exporter, err := mexporter.New(mexporter.WithProjectID(projectID))
+	if err != nil {
+		return nil, nil, err
+	}
+	reader := sdkmetric.NewPeriodicReader(exporter, sdkmetric.WithInterval(11*time.Second))
+	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+	return mp, getAttributes(containerRuntime), nil
 }
 
-func getLabels(containerRuntime string) *stackdriver.Labels {
-	l := &stackdriver.Labels{}
-	l.Set("container-runtime", containerRuntime, "container-runtime")
+func getAttributes(containerRuntime string) []attribute.KeyValue {
+	attrs := []attribute.KeyValue{attribute.String("container-runtime", containerRuntime)}
 	if labels == "" {
-		return l
+		return attrs
 	}
 	separated := strings.Split(labels, ",")
 	for _, s := range separated {
@@ -139,15 +121,15 @@ func getLabels(containerRuntime string) *stackdriver.Labels {
 			continue
 		}
 		log.Printf("Adding label %s=%s to metrics...", sep[0], sep[1])
-		l.Set(sep[0], sep[1], "")
+		attrs = append(attrs, attribute.String(sep[0], sep[1]))
 	}
-	return l
+	return attrs
 }
 
 func minikubeStartTime(ctx context.Context, projectID, minikubePath, containerRuntime string) (float64, error) {
 	defer deleteMinikube(ctx, minikubePath)
 
-	cmd := exec.CommandContext(ctx, minikubePath, "start", "--driver=docker", "-p", profile, "--memory=2048", "--trace=gcp", fmt.Sprintf("--container-runtime=%s", containerRuntime))
+	cmd := exec.CommandContext(ctx, minikubePath, "start", "--driver=docker", "-p", profile, "--memory=3072", "--trace=gcp", fmt.Sprintf("--container-runtime=%s", containerRuntime))
 	cmd.Env = append(os.Environ(), fmt.Sprintf("%s=%s", pkgtrace.ProjectEnvVar, projectID))
 	cmd.Stdout = os.Stderr
 	cmd.Stderr = os.Stderr
@@ -155,7 +137,7 @@ func minikubeStartTime(ctx context.Context, projectID, minikubePath, containerRu
 	t := time.Now()
 	log.Printf("Running [%v]....", cmd.Args)
 	if err := cmd.Run(); err != nil {
-		return 0, errors.Wrapf(err, "running %v", cmd.Args)
+		return 0, fmt.Errorf("running %v: %w", cmd.Args, err)
 	}
 	totalTime := time.Since(t).Seconds()
 	return totalTime, nil

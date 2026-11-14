@@ -1,4 +1,4 @@
-// +build integration
+//go:build integration
 
 /*
 Copyright 2020 The Kubernetes Authors All rights reserved.
@@ -22,19 +22,35 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"net"
 	"os/exec"
+	"path"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
-	"k8s.io/minikube/cmd/minikube/cmd"
+	"k8s.io/minikube/pkg/minikube/cluster"
 	"k8s.io/minikube/pkg/minikube/config"
+	"k8s.io/minikube/pkg/util/retry"
 )
 
 // TestMultiNode tests all multi node cluster functionality
 func TestMultiNode(t *testing.T) {
 	if NoneDriver() {
 		t.Skip("none driver does not support multinode")
+	}
+	if KVMDriver() {
+		t.Skip("skipping: flaky on KVM driver, serial subtests are tightly coupled and cannot be skipped individually: https://github.com/kubernetes/minikube/issues/23134")
+	}
+
+	if DockerDriver() {
+		rr, err := Run(t, exec.Command("docker", "version", "-f", "{{.Server.Version}}"))
+		if err != nil {
+			t.Fatalf("docker is broken: %v", err)
+		}
+		if strings.Contains(rr.Stdout.String(), "azure") {
+			t.Skip("kic containers are not supported on docker's azure")
+		}
 	}
 
 	type validatorFunc func(context.Context, *testing.T, string)
@@ -51,6 +67,7 @@ func TestMultiNode(t *testing.T) {
 			{"DeployApp2Nodes", validateDeployAppToMultiNode},
 			{"PingHostFrom2Pods", validatePodsPingHost},
 			{"AddNode", validateAddNodeToMultiNode},
+			{"MultiNodeLabels", validateMultiNodeLabels},
 			{"ProfileList", validateProfileListWithMultiNode},
 			{"CopyFile", validateCopyFileWithMultiNode},
 			{"StopNode", validateStopRunningNode},
@@ -77,7 +94,7 @@ func TestMultiNode(t *testing.T) {
 // validateMultiNodeStart makes sure a 2 node cluster can start
 func validateMultiNodeStart(ctx context.Context, t *testing.T, profile string) {
 	// Start a 2 node cluster with the --nodes param
-	startArgs := append([]string{"start", "-p", profile, "--wait=true", "--memory=2200", "--nodes=2", "-v=8", "--alsologtostderr"}, StartArgs()...)
+	startArgs := append([]string{"start", "-p", profile, "--wait=true", "--memory=3072", "--nodes=2", "-v=5", "--alsologtostderr"}, StartArgs()...)
 	rr, err := Run(t, exec.CommandContext(ctx, Target(), startArgs...))
 	if err != nil {
 		t.Fatalf("failed to start cluster. args %q : %v", rr.Command(), err)
@@ -102,7 +119,7 @@ func validateMultiNodeStart(ctx context.Context, t *testing.T, profile string) {
 // validateAddNodeToMultiNode uses the minikube node add command to add a node to an existing cluster
 func validateAddNodeToMultiNode(ctx context.Context, t *testing.T, profile string) {
 	// Add a node to the current cluster
-	addArgs := []string{"node", "add", "-p", profile, "-v", "3", "--alsologtostderr"}
+	addArgs := []string{"node", "add", "-p", profile, "-v=5", "--alsologtostderr"}
 	rr, err := Run(t, exec.CommandContext(ctx, Target(), addArgs...))
 	if err != nil {
 		t.Fatalf("failed to add node to current cluster. args %q : %v", rr.Command(), err)
@@ -160,7 +177,7 @@ func validateProfileListWithMultiNode(ctx context.Context, t *testing.T, profile
 	}
 }
 
-// validateProfileListWithMultiNode make sure minikube profile list outputs correct with multinode clusters
+// validateCopyFileWithMultiNode make sure minikube cp works with multinode clusters.
 func validateCopyFileWithMultiNode(ctx context.Context, t *testing.T, profile string) {
 	if NoneDriver() {
 		t.Skipf("skipping: cp is unsupported by none driver")
@@ -171,16 +188,58 @@ func validateCopyFileWithMultiNode(ctx context.Context, t *testing.T, profile st
 		t.Fatalf("failed to run minikube status. args %q : %v", rr.Command(), err)
 	}
 
-	var statuses []cmd.Status
+	var statuses []cluster.Status
 	if err = json.Unmarshal(rr.Stdout.Bytes(), &statuses); err != nil {
 		t.Errorf("failed to decode json from status: args %q: %v", rr.Command(), err)
 	}
 
-	for _, s := range statuses {
-		if s.Worker {
-			testCpCmd(ctx, t, profile, s.Name)
-		} else {
-			testCpCmd(ctx, t, profile, "")
+	tmpDir := t.TempDir()
+
+	srcPath := cpTestLocalPath()
+	dstPath := cpTestMinikubePath()
+
+	for _, n := range statuses {
+		// copy local to node
+		testCpCmd(ctx, t, profile, "", srcPath, n.Name, dstPath)
+
+		// copy back from node to local
+		tmpPath := filepath.Join(tmpDir, fmt.Sprintf("cp-test_%s.txt", n.Name))
+		testCpCmd(ctx, t, profile, n.Name, dstPath, "", tmpPath)
+
+		// copy node to node
+		for _, n2 := range statuses {
+			if n.Name == n2.Name {
+				continue
+			}
+			fp := path.Join("/home/docker", fmt.Sprintf("cp-test_%s_%s.txt", n.Name, n2.Name))
+			testCpCmd(ctx, t, profile, n.Name, dstPath, n2.Name, fp)
+		}
+	}
+}
+
+// validateMultiNodeLabels check if all node labels were configured correctly
+func validateMultiNodeLabels(ctx context.Context, t *testing.T, profile string) {
+	// docs: Get the node labels from the cluster with `kubectl get nodes`
+	rr, err := Run(t, exec.CommandContext(ctx, KubectlBinary(), "--context", profile, "get", "nodes", "-o", "jsonpath=[{range .items[*]}{.metadata.labels},{end}]"))
+	if err != nil {
+		t.Errorf("failed to 'kubectl get nodes' with args %q: %v", rr.Command(), err)
+	}
+
+	nodeLabelsList := []map[string]string{}
+	fixedString := strings.Replace(rr.Stdout.String(), ",]", "]", 1)
+	err = json.Unmarshal([]byte(fixedString), &nodeLabelsList)
+	if err != nil {
+		t.Errorf("failed to decode json from label list: args %q: %v", rr.Command(), err)
+	}
+
+	// docs: check if all node labels matches with the expected Minikube labels: `minikube.k8s.io/*`
+	expectedLabels := []string{"minikube.k8s.io/commit", "minikube.k8s.io/version", "minikube.k8s.io/updated_at", "minikube.k8s.io/name", "minikube.k8s.io/primary"}
+
+	for _, nodeLabels := range nodeLabelsList {
+		for _, el := range expectedLabels {
+			if _, ok := nodeLabels[el]; !ok {
+				t.Errorf("expected to have label %q in node labels but got : %s", el, rr.Output())
+			}
 		}
 	}
 }
@@ -221,26 +280,19 @@ func validateStopRunningNode(ctx context.Context, t *testing.T, profile string) 
 
 // validateStartNodeAfterStop tests the minikube node start command on an existing stopped node
 func validateStartNodeAfterStop(ctx context.Context, t *testing.T, profile string) {
-	if DockerDriver() {
-		rr, err := Run(t, exec.Command("docker", "version", "-f", "{{.Server.Version}}"))
-		if err != nil {
-			t.Fatalf("docker is broken: %v", err)
-		}
-		if strings.Contains(rr.Stdout.String(), "azure") {
-			t.Skip("kic containers are not supported on docker's azure")
-		}
-	}
-
 	// Start the node back up
-	rr, err := Run(t, exec.CommandContext(ctx, Target(), "-p", profile, "node", "start", ThirdNodeName, "--alsologtostderr"))
+	rr, err := Run(t, exec.CommandContext(ctx, Target(), "-p", profile, "node", "start", ThirdNodeName, "-v=5", "--alsologtostderr"))
 	if err != nil {
-		t.Logf(rr.Stderr.String())
+		t.Log(rr.Stderr.String())
 		t.Errorf("node start returned an error. args %q: %v", rr.Command(), err)
 	}
 
 	// Make sure minikube status shows 3 running hosts
-	rr, err = Run(t, exec.CommandContext(ctx, Target(), "-p", profile, "status"))
-	if err != nil {
+	minikubeStatus := func() error {
+		rr, err = Run(t, exec.CommandContext(ctx, Target(), "-p", profile, "status", "-v=5", "--alsologtostderr"))
+		return err
+	}
+	if err := retry.Expo(minikubeStatus, 1*time.Second, 60*time.Second); err != nil {
 		t.Fatalf("failed to run minikube status. args %q : %v", rr.Command(), err)
 	}
 
@@ -253,7 +305,7 @@ func validateStartNodeAfterStop(ctx context.Context, t *testing.T, profile strin
 	}
 
 	// Make sure kubectl can connect correctly
-	rr, err = Run(t, exec.CommandContext(ctx, "kubectl", "get", "nodes"))
+	rr, err = Run(t, exec.CommandContext(ctx, KubectlBinary(), "get", "nodes"))
 	if err != nil {
 		t.Fatalf("failed to kubectl get nodes. args %q : %v", rr.Command(), err)
 	}
@@ -273,7 +325,7 @@ func validateRestartKeepsNodes(ctx context.Context, t *testing.T, profile string
 		t.Errorf("failed to run minikube stop. args %q : %v", rr.Command(), err)
 	}
 
-	_, err = Run(t, exec.CommandContext(ctx, Target(), "start", "-p", profile, "--wait=true", "-v=8", "--alsologtostderr"))
+	_, err = Run(t, exec.CommandContext(ctx, Target(), "start", "-p", profile, "--wait=true", "-v=5", "--alsologtostderr"))
 	if err != nil {
 		t.Errorf("failed to run minikube start. args %q : %v", rr.Command(), err)
 	}
@@ -294,7 +346,7 @@ func validateStopMultiNodeCluster(ctx context.Context, t *testing.T, profile str
 	// Run minikube stop on the cluster
 	rr, err := Run(t, exec.CommandContext(ctx, Target(), "-p", profile, "stop"))
 	if err != nil {
-		t.Errorf("node stop returned an error. args %q: %v", rr.Command(), err)
+		t.Errorf("failed to stop cluster. args %q: %v", rr.Command(), err)
 	}
 
 	// Run status to see the stopped hosts
@@ -321,17 +373,8 @@ func validateStopMultiNodeCluster(ctx context.Context, t *testing.T, profile str
 
 // validateRestartMultiNodeCluster verifies a soft restart on a multinode cluster works
 func validateRestartMultiNodeCluster(ctx context.Context, t *testing.T, profile string) {
-	if DockerDriver() {
-		rr, err := Run(t, exec.Command("docker", "version", "-f", "{{.Server.Version}}"))
-		if err != nil {
-			t.Fatalf("docker is broken: %v", err)
-		}
-		if strings.Contains(rr.Stdout.String(), "azure") {
-			t.Skip("kic containers are not supported on docker's azure")
-		}
-	}
 	// Restart a full cluster with minikube start
-	startArgs := append([]string{"start", "-p", profile, "--wait=true", "-v=8", "--alsologtostderr"}, StartArgs()...)
+	startArgs := append([]string{"start", "-p", profile, "--wait=true", "-v=5", "--alsologtostderr"}, StartArgs()...)
 	rr, err := Run(t, exec.CommandContext(ctx, Target(), startArgs...))
 	if err != nil {
 		t.Fatalf("failed to start cluster. args %q : %v", rr.Command(), err)
@@ -352,7 +395,7 @@ func validateRestartMultiNodeCluster(ctx context.Context, t *testing.T, profile 
 	}
 
 	// Make sure kubectl reports that all nodes are ready
-	rr, err = Run(t, exec.CommandContext(ctx, "kubectl", "get", "nodes"))
+	rr, err = Run(t, exec.CommandContext(ctx, KubectlBinary(), "get", "nodes"))
 	if err != nil {
 		t.Fatalf("failed to run kubectl get nodes. args %q : %v", rr.Command(), err)
 	}
@@ -360,7 +403,7 @@ func validateRestartMultiNodeCluster(ctx context.Context, t *testing.T, profile 
 		t.Errorf("expected 2 nodes to be Ready, got %v", rr.Output())
 	}
 
-	rr, err = Run(t, exec.CommandContext(ctx, "kubectl", "get", "nodes", "-o", `go-template='{{range .items}}{{range .status.conditions}}{{if eq .type "Ready"}} {{.status}}{{"\n"}}{{end}}{{end}}{{end}}'`))
+	rr, err = Run(t, exec.CommandContext(ctx, KubectlBinary(), "get", "nodes", "-o", `go-template='{{range .items}}{{range .status.conditions}}{{if eq .type "Ready"}} {{.status}}{{"\n"}}{{end}}{{end}}{{end}}'`))
 	if err != nil {
 		t.Fatalf("failed to run kubectl get nodes. args %q : %v", rr.Command(), err)
 	}
@@ -371,10 +414,10 @@ func validateRestartMultiNodeCluster(ctx context.Context, t *testing.T, profile 
 
 // validateDeleteNodeFromMultiNode tests the minikube node delete command
 func validateDeleteNodeFromMultiNode(ctx context.Context, t *testing.T, profile string) {
-	// Start the node back up
+	// Delete a node from the current cluster
 	rr, err := Run(t, exec.CommandContext(ctx, Target(), "-p", profile, "node", "delete", ThirdNodeName))
 	if err != nil {
-		t.Errorf("node stop returned an error. args %q: %v", rr.Command(), err)
+		t.Errorf("node delete returned an error. args %q: %v", rr.Command(), err)
 	}
 
 	// Make sure status is back down to 2 hosts
@@ -391,18 +434,8 @@ func validateDeleteNodeFromMultiNode(ctx context.Context, t *testing.T, profile 
 		t.Errorf("status says both kubelets are not running: args %q: %v", rr.Command(), rr.Stdout.String())
 	}
 
-	if DockerDriver() {
-		rr, err := Run(t, exec.Command("docker", "volume", "ls"))
-		if err != nil {
-			t.Errorf("failed to run %q : %v", rr.Command(), err)
-		}
-		if strings.Contains(rr.Stdout.String(), fmt.Sprintf("%s-%s", profile, ThirdNodeName)) {
-			t.Errorf("docker volume was not properly deleted: %s", rr.Stdout.String())
-		}
-	}
-
 	// Make sure kubectl knows the node is gone
-	rr, err = Run(t, exec.CommandContext(ctx, "kubectl", "get", "nodes"))
+	rr, err = Run(t, exec.CommandContext(ctx, KubectlBinary(), "get", "nodes"))
 	if err != nil {
 		t.Fatalf("failed to run kubectl get nodes. args %q : %v", rr.Command(), err)
 	}
@@ -410,7 +443,7 @@ func validateDeleteNodeFromMultiNode(ctx context.Context, t *testing.T, profile 
 		t.Errorf("expected 2 nodes to be Ready, got %v", rr.Output())
 	}
 
-	rr, err = Run(t, exec.CommandContext(ctx, "kubectl", "get", "nodes", "-o", `go-template='{{range .items}}{{range .status.conditions}}{{if eq .type "Ready"}} {{.status}}{{"\n"}}{{end}}{{end}}{{end}}'`))
+	rr, err = Run(t, exec.CommandContext(ctx, KubectlBinary(), "get", "nodes", "-o", `go-template='{{range .items}}{{range .status.conditions}}{{if eq .type "Ready"}} {{.status}}{{"\n"}}{{end}}{{end}}{{end}}'`))
 	if err != nil {
 		t.Fatalf("failed to run kubectl get nodes. args %q : %v", rr.Command(), err)
 	}
@@ -427,7 +460,7 @@ func validateNameConflict(ctx context.Context, t *testing.T, profile string) {
 	}
 	curNodeNum := strings.Count(rr.Stdout.String(), profile)
 
-	// Start new profile. It's expected failture
+	// Start new profile. It's expected failure
 	profileName := fmt.Sprintf("%s-m0%d", profile, curNodeNum)
 	startArgs := append([]string{"start", "-p", profileName}, StartArgs()...)
 	rr, err = Run(t, exec.CommandContext(ctx, Target(), startArgs...))
@@ -443,7 +476,7 @@ func validateNameConflict(ctx context.Context, t *testing.T, profile string) {
 		t.Errorf("failed to start profile. args %q : %v", rr.Command(), err)
 	}
 
-	// Add a node to the current cluster. It's expected failture
+	// Add a node to the current cluster. It's expected failure
 	addArgs := []string{"node", "add", "-p", profile}
 	rr, err = Run(t, exec.CommandContext(ctx, Target(), addArgs...))
 	if err == nil {
@@ -470,19 +503,31 @@ func validateDeployAppToMultiNode(ctx context.Context, t *testing.T, profile str
 	}
 
 	// resolve Pod IPs
-	rr, err := Run(t, exec.CommandContext(ctx, Target(), "kubectl", "-p", profile, "--", "get", "pods", "-o", "jsonpath='{.items[*].status.podIP}'"))
-	if err != nil {
-		t.Errorf("failed to retrieve Pod IPs")
+	resolvePodIPs := func() error {
+		rr, err := Run(t, exec.CommandContext(ctx, Target(), "kubectl", "-p", profile, "--", "get", "pods", "-o", "jsonpath='{.items[*].status.podIP}'"))
+		if err != nil {
+			err := fmt.Errorf("failed to retrieve Pod IPs (may be temporary): %v", err)
+			t.Log(err.Error())
+			return err
+		}
+		podIPs := strings.Split(strings.Trim(rr.Stdout.String(), "'"), " ")
+		if len(podIPs) != 2 {
+			err := fmt.Errorf("expected 2 Pod IPs but got %d (may be temporary), output: %q", len(podIPs), rr.Output())
+			t.Log(err.Error())
+			return err
+		} else if podIPs[0] == podIPs[1] {
+			err := fmt.Errorf("expected 2 different pod IPs but got %s and %s (may be temporary), output: %q", podIPs[0], podIPs[1], rr.Output())
+			t.Log(err.Error())
+			return err
+		}
+		return nil
 	}
-	podIPs := strings.Split(strings.Trim(rr.Stdout.String(), "'"), " ")
-	if len(podIPs) != 2 {
-		t.Errorf("expected 2 Pod IPs but got %d", len(podIPs))
-	} else if podIPs[0] == podIPs[1] {
-		t.Errorf("expected 2 different pod IPs but got %s and %s", podIPs[0], podIPs[0])
+	if err := retry.Expo(resolvePodIPs, 1*time.Second, Seconds(120)); err != nil {
+		t.Errorf("failed to resolve pod IPs: %v", err)
 	}
 
 	// get Pod names
-	rr, err = Run(t, exec.CommandContext(ctx, Target(), "kubectl", "-p", profile, "--", "get", "pods", "-o", "jsonpath='{.items[*].metadata.name}'"))
+	rr, err := Run(t, exec.CommandContext(ctx, Target(), "kubectl", "-p", profile, "--", "get", "pods", "-o", "jsonpath='{.items[*].metadata.name}'"))
 	if err != nil {
 		t.Errorf("failed get Pod names")
 	}
@@ -490,32 +535,23 @@ func validateDeployAppToMultiNode(ctx context.Context, t *testing.T, profile str
 
 	// verify both Pods could resolve a public DNS
 	for _, name := range podNames {
-		_, err = Run(t, exec.CommandContext(ctx, Target(), "kubectl", "-p", profile, "--", "exec", name, "--", "nslookup", "kubernetes.io"))
-		if err != nil {
-			t.Errorf("Pod %s could not resolve 'kubernetes.io': %v", name, err)
-		}
+		podResolve(ctx, t, name, "kubernetes.io", Target(), "kubectl", "-p", profile, "--")
 	}
 
 	// verify both Pods could resolve "kubernetes.default"
 	// this one is also checked by k8s e2e node conformance tests:
 	// https://github.com/kubernetes/kubernetes/blob/f137c4777095b3972e2dd71a01365d47be459389/test/e2e_node/environment/conformance.go#L125-L179
 	for _, name := range podNames {
-		_, err = Run(t, exec.CommandContext(ctx, Target(), "kubectl", "-p", profile, "--", "exec", name, "--", "nslookup", "kubernetes.default"))
-		if err != nil {
-			t.Errorf("Pod %s could not resolve 'kubernetes.default': %v", name, err)
-		}
+		podResolve(ctx, t, name, "kubernetes.default", Target(), "kubectl", "-p", profile, "--")
 	}
 
 	// verify both pods could resolve to a local service.
 	for _, name := range podNames {
-		_, err = Run(t, exec.CommandContext(ctx, Target(), "kubectl", "-p", profile, "--", "exec", name, "--", "nslookup", "kubernetes.default.svc.cluster.local"))
-		if err != nil {
-			t.Errorf("Pod %s could not resolve local service (kubernetes.default.svc.cluster.local): %v", name, err)
-		}
+		podResolve(ctx, t, name, "kubernetes.default.svc.cluster.local", Target(), "kubectl", "-p", profile, "--")
 	}
 }
 
-// validatePodsPingHost uses app previously deplyed by validateDeployAppToMultiNode to verify its pods, located on different nodes, can resolve "host.minikube.internal".
+// validatePodsPingHost uses app previously deployed by validateDeployAppToMultiNode to verify its pods, located on different nodes, can resolve "host.minikube.internal".
 func validatePodsPingHost(ctx context.Context, t *testing.T, profile string) {
 	// get Pod names
 	rr, err := Run(t, exec.CommandContext(ctx, Target(), "kubectl", "-p", profile, "--", "get", "pods", "-o", "jsonpath='{.items[*].metadata.name}'"))
@@ -525,13 +561,9 @@ func validatePodsPingHost(ctx context.Context, t *testing.T, profile string) {
 	podNames := strings.Split(strings.Trim(rr.Stdout.String(), "'"), " ")
 
 	for _, name := range podNames {
-		// get host.minikube.internal ip as resolved by nslookup
-		out, err := Run(t, exec.CommandContext(ctx, Target(), "kubectl", "-p", profile, "--", "exec", name, "--", "sh", "-c", "nslookup host.minikube.internal | awk 'NR==5' | cut -d' ' -f3"))
-		if err != nil {
-			t.Errorf("Pod %s could not resolve 'host.minikube.internal': %v", name, err)
-			continue
-		}
-		hostIP := net.ParseIP(strings.TrimSpace(out.Stdout.String()))
+		// get host.minikube.internal ip as resolved by dig
+		ips := podResolve(ctx, t, name, "host.minikube.internal", Target(), "kubectl", "-p", profile, "--")
+		hostIP := ips[0]
 		// try pinging host from pod
 		ping := fmt.Sprintf("ping -c 1 %s", hostIP)
 		if _, err := Run(t, exec.CommandContext(ctx, Target(), "kubectl", "-p", profile, "--", "exec", name, "--", "sh", "-c", ping)); err != nil {

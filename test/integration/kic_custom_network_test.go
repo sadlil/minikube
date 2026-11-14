@@ -1,4 +1,4 @@
-// +build integration
+//go:build integration
 
 /*
 Copyright 2020 The Kubernetes Authors All rights reserved.
@@ -53,6 +53,7 @@ func TestKicCustomNetwork(t *testing.T) {
 			defer Cleanup(t, profile, cancel)
 
 			startArgs := []string{"start", "-p", profile, fmt.Sprintf("--network=%s", test.networkName)}
+			startArgs = append(startArgs, StartArgs()...)
 			c := exec.CommandContext(ctx, Target(), startArgs...)
 			rr, err := Run(t, c)
 			if err != nil {
@@ -74,11 +75,11 @@ func TestKicExistingNetwork(t *testing.T) {
 	}
 	// create custom network
 	networkName := "existing-network"
-	if _, err := oci.CreateNetwork(oci.Docker, networkName); err != nil {
+	if _, err := oci.CreateNetwork(oci.Docker, networkName, "", ""); err != nil {
 		t.Fatalf("error creating network: %v", err)
 	}
 	defer func() {
-		if err := oci.DeleteKICNetworks(oci.Docker); err != nil {
+		if err := oci.DeleteKICNetworksByLabel(oci.Docker, networkName); err != nil {
 			t.Logf("error deleting kic network, may need to delete manually: %v", err)
 		}
 	}()
@@ -89,10 +90,62 @@ func TestKicExistingNetwork(t *testing.T) {
 	verifyNetworkExists(ctx, t, networkName)
 
 	startArgs := []string{"start", "-p", profile, fmt.Sprintf("--network=%s", networkName)}
+	startArgs = append(startArgs, StartArgs()...)
 	c := exec.CommandContext(ctx, Target(), startArgs...)
 	rr, err := Run(t, c)
 	if err != nil {
 		t.Fatalf("%v failed: %v\n%v", rr.Command(), err, rr.Output())
+	}
+}
+
+// TestKicCustomSubnet verifies the docker/podman driver works with a custom subnet
+func TestKicCustomSubnet(t *testing.T) {
+	if !KicDriver() {
+		t.Skip("only runs with docker/podman driver")
+	}
+
+	profile := UniqueProfileName("custom-subnet")
+	ctx, cancel := context.WithTimeout(context.Background(), Minutes(5))
+	defer Cleanup(t, profile, cancel)
+
+	subnet := "192.168.60.0/24"
+	startArgs := []string{"start", "-p", profile, fmt.Sprintf("--subnet=%s", subnet)}
+	startArgs = append(startArgs, StartArgs()...)
+	c := exec.CommandContext(ctx, Target(), startArgs...)
+	rr, err := Run(t, c)
+	if err != nil {
+		t.Fatalf("%v failed: %v\n%v", rr.Command(), err, rr.Output())
+	}
+
+	verifySubnet(ctx, t, profile, subnet)
+}
+
+// TestKicStaticIP starts minikube with the static IP flag
+func TestKicStaticIP(t *testing.T) {
+	if !KicDriver() {
+		t.Skip("only run with docker/podman driver")
+	}
+	profile := UniqueProfileName("static-ip")
+	ctx, cancel := context.WithTimeout(context.Background(), Minutes(5))
+	defer Cleanup(t, profile, cancel)
+
+	staticIP := "192.168.200.200"
+	startArgs := []string{"start", "-p", profile, fmt.Sprintf("--static-ip=%s", staticIP)}
+	startArgs = append(startArgs, StartArgs()...)
+	c := exec.CommandContext(ctx, Target(), startArgs...)
+	rr, err := Run(t, c)
+	if err != nil {
+		t.Fatalf("%v failed: %v\n%v", rr.Command(), err, rr.Output())
+	}
+
+	c = exec.CommandContext(ctx, Target(), "-p", profile, "ip")
+	rr, err = Run(t, c)
+	if err != nil {
+		t.Fatalf("%s failed: %v\n%s", rr.Command(), err, rr.Output())
+	}
+
+	if !strings.Contains(rr.Output(), staticIP) {
+		t.Errorf("static IP (%s) not found in output %s", staticIP, rr.Output())
 	}
 }
 
@@ -104,5 +157,17 @@ func verifyNetworkExists(ctx context.Context, t *testing.T, networkName string) 
 	}
 	if output := rr.Output(); !strings.Contains(output, networkName) {
 		t.Fatalf("%s network is not listed by [%v]: %v", networkName, c.Args, output)
+	}
+}
+
+func verifySubnet(ctx context.Context, t *testing.T, network, subnet string) {
+	c := exec.CommandContext(ctx, "docker", "network", "inspect", network, "--format", "{{(index .IPAM.Config 0).Subnet}}")
+	rr, err := Run(t, c)
+	if err != nil {
+		t.Fatalf("%v failed: %v\n%v", rr.Command(), err, rr.Output())
+	}
+
+	if output := strings.TrimSpace(rr.Output()); !strings.Contains(output, subnet) {
+		t.Fatalf("%s subnet not match to %v", subnet, output)
 	}
 }

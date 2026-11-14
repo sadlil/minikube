@@ -20,37 +20,36 @@ import (
 	"fmt"
 	"os/exec"
 
-	"github.com/docker/machine/libmachine"
-	"github.com/docker/machine/libmachine/host"
-	"github.com/docker/machine/libmachine/ssh"
-	"github.com/docker/machine/libmachine/state"
-	"github.com/pkg/errors"
+	"k8s.io/minikube/pkg/libmachine"
+	"k8s.io/minikube/pkg/libmachine/host"
+	"k8s.io/minikube/pkg/libmachine/ssh"
+	"k8s.io/minikube/pkg/libmachine/state"
 	"k8s.io/minikube/pkg/minikube/config"
 )
 
 // GetHost find node's host information by name in the given cluster.
 func GetHost(api libmachine.API, cc config.ClusterConfig, n config.Node) (*host.Host, error) {
 	machineName := config.MachineName(cc, n)
-	host, err := LoadHost(api, machineName)
+	hostInfo, err := LoadHost(api, machineName)
 	if err != nil {
-		return nil, errors.Wrap(err, "host exists and load")
+		return nil, fmt.Errorf("host exists and load: %w", err)
 	}
 
-	currentState, err := host.Driver.GetState()
+	currentState, err := hostInfo.Driver.GetState()
 	if err != nil {
-		return nil, errors.Wrap(err, "state")
+		return nil, fmt.Errorf("state: %w", err)
 	}
 
 	if currentState != state.Running {
-		return nil, errors.Errorf("%q is not running", machineName)
+		return nil, fmt.Errorf("%q is not running", machineName)
 	}
 
-	return host, nil
+	return hostInfo, nil
 }
 
 // CreateSSHShell creates a new SSH shell / client
 func CreateSSHShell(api libmachine.API, cc config.ClusterConfig, n config.Node, args []string, native bool) error {
-	host, err := GetHost(api, cc, n)
+	hostInfo, err := GetHost(api, cc, n)
 	if err != nil {
 		return err
 	}
@@ -61,26 +60,26 @@ func CreateSSHShell(api libmachine.API, cc config.ClusterConfig, n config.Node, 
 		ssh.SetDefaultClient(ssh.External)
 	}
 
-	client, err := host.CreateSSHClient()
+	client, err := hostInfo.CreateSSHClient()
 
 	if err != nil {
-		return errors.Wrap(err, "Creating ssh client")
+		return fmt.Errorf("Creating ssh client: %w", err)
 	}
 	return client.Shell(args...)
 }
 
 // GetSSHHostAddrPort returns the host address and port for ssh
 func GetSSHHostAddrPort(api libmachine.API, cc config.ClusterConfig, n config.Node) (string, int, error) {
-	host, err := GetHost(api, cc, n)
+	hostInfo, err := GetHost(api, cc, n)
 	if err != nil {
 		return "", 0, err
 	}
 
-	addr, err := host.Driver.GetSSHHostname()
+	addr, err := hostInfo.Driver.GetSSHHostname()
 	if err != nil {
 		return "", 0, err
 	}
-	port, err := host.Driver.GetSSHPort()
+	port, err := hostInfo.Driver.GetSSHPort()
 	if err != nil {
 		return "", 0, err
 	}

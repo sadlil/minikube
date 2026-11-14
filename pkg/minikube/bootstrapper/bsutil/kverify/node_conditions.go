@@ -22,13 +22,12 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/pkg/errors"
 	v1 "k8s.io/api/core/v1"
 	meta "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/klog/v2"
-	kconst "k8s.io/kubernetes/cmd/kubeadm/app/constants"
 	"k8s.io/minikube/pkg/util/retry"
+	kconst "k8s.io/minikube/third_party/kubeadm/app/constants"
 )
 
 // NodeCondition represents a favorable or unfavorable node condition.
@@ -97,7 +96,7 @@ func (e *ErrNetworkNotReady) Error() string {
 	return fmt.Sprintf(errTextFormat, e.Type, e.Reason, e.Message)
 }
 
-// NodePressure verfies that node is not under disk, memory, pid or network pressure.
+// NodePressure verifies that node is not under disk, memory, pid or network pressure.
 func NodePressure(cs *kubernetes.Clientset) error {
 	klog.Info("verifying NodePressure condition ...")
 	start := time.Now()
@@ -115,7 +114,7 @@ func NodePressure(cs *kubernetes.Clientset) error {
 
 	err = retry.Expo(listNodes, kconst.APICallRetryInterval, 2*time.Minute)
 	if err != nil {
-		return errors.Wrap(err, "list nodes retry")
+		return fmt.Errorf("list nodes retry: %w", err)
 	}
 
 	for _, n := range ns.Items {

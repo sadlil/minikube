@@ -22,21 +22,28 @@ import (
 )
 
 // supportedDrivers is a list of supported drivers on Darwin.
-var supportedDrivers []string = func() []string {
+var supportedDrivers = func() []string {
 	if runtime.GOARCH == "arm64" {
-		// on darwin/arm64 only docker and ssh are supported yet
+		// on darwin/arm64 VirtualBox requires 7.1+ (checked in the virtualbox driver's status())
 		return []string{
+			QEMU2,
+			VFKit,
+			Krunkit,
+			Parallels,
+			VirtualBox,
 			Docker,
+			Podman,
 			SSH,
 		}
 	}
 	return []string{
 		VirtualBox,
 		Parallels,
-		VMwareFusion,
-		HyperKit,
 		VMware,
+		QEMU2,
+		VFKit,
 		Docker,
+		Podman,
 		SSH,
 	}
 }()

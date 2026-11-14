@@ -17,7 +17,10 @@ limitations under the License.
 package cmd
 
 import (
+	"os"
+
 	"github.com/spf13/cobra"
+	"k8s.io/minikube/cmd/minikube/cmd/flags"
 	"k8s.io/minikube/pkg/minikube/config"
 	"k8s.io/minikube/pkg/minikube/exit"
 	"k8s.io/minikube/pkg/minikube/machine"
@@ -29,27 +32,30 @@ import (
 )
 
 var nodeStopCmd = &cobra.Command{
-	Use:   "stop",
-	Short: "Stops a node in a cluster.",
-	Long:  "Stops a node in a cluster.",
-	Run: func(cmd *cobra.Command, args []string) {
+	Use:     "stop NODE_NAME",
+	Short:   "Stops a node in a cluster.",
+	Long:    "Stops a node in a cluster.",
+	Example: "minikube node stop m02",
+	Run: func(_ *cobra.Command, args []string) {
 		if len(args) == 0 {
-			exit.Message(reason.Usage, "Usage: minikube node stop [name]")
+			exit.Message(reason.Usage, "Usage: minikube node stop NODE_NAME")
 		}
 
+		options := flags.CommandOptions()
 		name := args[0]
-		api, cc := mustload.Partial(ClusterFlagValue())
+		api, cc := mustload.Partial(ClusterFlagValue(), options)
 
 		n, _, err := node.Retrieve(*cc, name)
 		if err != nil {
-			exit.Error(reason.GuestNodeRetrieve, "retrieving node", err)
+			exit.Message(reason.GuestNodeRetrieve, err.Error())
 		}
 
 		machineName := config.MachineName(*cc, *n)
 
 		err = machine.StopHost(api, machineName)
 		if err != nil {
-			out.FatalT("Failed to stop node {{.name}}", out.V{"name": name})
+			out.ErrT(style.Fatal, "Failed to stop node {{.name}}: {{.error}}", out.V{"name": name, "error": err})
+			os.Exit(reason.ExHostError)
 		}
 		out.Step(style.Stopped, "Successfully stopped node {{.name}}", out.V{"name": machineName})
 	},

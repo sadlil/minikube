@@ -1,0 +1,53 @@
+name: العربية
+description: الإبلاغ عن مشكلة
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: ماذا حدث؟
+      description: |
+        نصيحة: أضف العلم "--alsologtostderr" إلى سطر الأوامر للحصول على مزيد من السجلات
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: أرفق ملف السجلات
+      description: |
+        نصيحة: شغّل الأمر `minikube logs --file=log.txt` ثم قم بسحب وإفلات ملف `log.txt` في المتصفح.
+    validations:
+      required: true
+  - type: dropdown
+    id: operating-system
+    attributes:
+      label: نظام التشغيل
+      description: ما هو نظام التشغيل لديك؟
+      options:
+        - macOS (Default)
+        - Windows
+        - Ubuntu
+        - Redhat/Fedora
+        - Other
+    validations:
+      required: false
+  - type: dropdown
+    id: driver
+    attributes:
+      label: برنامج التشغيل
+      description: ما هو برنامج التشغيل الذي تستخدمه؟
+      options:
+        - N/A
+        - Docker
+        - Podman
+        - Hyper-V
+        - KVM2
+        - VirtualBox
+        - None (Baremetal)
+        - SSH
+        - VMware
+        - Parallels
+        - QEMU
+        - vfkit
+        - krunkit
+    validations:
+      required: false

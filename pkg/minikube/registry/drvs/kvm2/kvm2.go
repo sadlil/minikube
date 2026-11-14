@@ -1,4 +1,4 @@
-// +build linux
+//go:build linux
 
 /*
 Copyright 2018 The Kubernetes Authors All rights reserved.
@@ -20,61 +20,60 @@ package kvm2
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"os/user"
 	"path/filepath"
+	"runtime"
+	"slices"
 	"strings"
 	"time"
 
-	"github.com/docker/machine/libmachine/drivers"
+	"k8s.io/klog/v2"
+	"k8s.io/minikube/pkg/libmachine/drivers"
 
+	"k8s.io/minikube/pkg/drivers/common/mac"
+	"k8s.io/minikube/pkg/drivers/kvm"
 	"k8s.io/minikube/pkg/minikube/config"
 	"k8s.io/minikube/pkg/minikube/download"
 	"k8s.io/minikube/pkg/minikube/driver"
 	"k8s.io/minikube/pkg/minikube/localpath"
 	"k8s.io/minikube/pkg/minikube/registry"
+	"k8s.io/minikube/pkg/minikube/run"
 )
 
 const (
 	docURL = "https://minikube.sigs.k8s.io/docs/reference/drivers/kvm2/"
 )
 
+// The driver is implemented for amd64 and arm64, but we cannot build the arm64
+// version yet: https://github.com/kubernetes/minikube/issues/19959.
+var supportedArchictures = []string{"amd64"}
+
 func init() {
 	if err := registry.Register(registry.DriverDef{
-		Name:     driver.KVM2,
-		Alias:    []string{driver.AliasKVM},
-		Config:   configure,
-		Status:   status,
-		Default:  true,
-		Priority: registry.Preferred,
+		Name:         driver.KVM2,
+		Alias:        []string{driver.AliasKVM},
+		Init:         func(_ *run.CommandOptions) drivers.Driver { return kvm.NewDriver("", "") },
+		Config:       configure,
+		Status:       status,
+		Default:      true,
+		Priority:     registry.Preferred,
+		Parallel:     true,
+		ProbeTimeout: 6 * time.Second,
 	}); err != nil {
 		panic(fmt.Sprintf("register failed: %v", err))
 	}
 }
 
-// This is duplicate of kvm.Driver. Avoids importing the kvm2 driver, which requires cgo & libvirt.
-type kvmDriver struct {
-	*drivers.BaseDriver
-
-	Memory         int
-	DiskSize       int
-	CPU            int
-	Network        string
-	PrivateNetwork string
-	ISO            string
-	Boot2DockerURL string
-	DiskPath       string
-	GPU            bool
-	Hidden         bool
-	ConnectionURI  string
-	NUMANodeCount  int
-}
-
 func configure(cc config.ClusterConfig, n config.Node) (interface{}, error) {
 	name := config.MachineName(cc, n)
-	return kvmDriver{
+	macAddr := mac.FromName(name)
+	privateMACAddr := mac.FromName(name + "-private")
+	klog.Infof("Using mac address %s, private mac address %s", macAddr, privateMACAddr)
+	return kvm.Driver{
 		BaseDriver: &drivers.BaseDriver{
 			MachineName: name,
 			StorePath:   localpath.MiniPath(),
@@ -88,10 +87,13 @@ func configure(cc config.ClusterConfig, n config.Node) (interface{}, error) {
 		DiskSize:       cc.DiskSize,
 		DiskPath:       filepath.Join(localpath.MiniPath(), "machines", name, fmt.Sprintf("%s.rawdisk", name)),
 		ISO:            filepath.Join(localpath.MiniPath(), "machines", name, "boot2docker.iso"),
+		MAC:            macAddr,
+		PrivateMAC:     privateMACAddr,
 		GPU:            cc.KVMGPU,
 		Hidden:         cc.KVMHidden,
 		ConnectionURI:  cc.KVMQemuURI,
 		NUMANodeCount:  cc.KVMNUMACount,
+		ExtraDisks:     cc.ExtraDisks,
 	}, nil
 }
 
@@ -112,9 +114,47 @@ func defaultURI() string {
 	return "qemu:///system"
 }
 
-func status() registry.State {
+func status(_ *run.CommandOptions) registry.State {
+	if !slices.Contains(supportedArchictures, runtime.GOARCH) {
+		rs := registry.State{
+			Error: fmt.Errorf("KVM is not supported on %q, contributions are welcome", runtime.GOARCH),
+			Fix:   fmt.Sprintf("you can use the KVM driver on %s", strings.Join(supportedArchictures, ",")),
+		}
+		// The driver is implemented but we cannot build it yet.
+		if runtime.GOARCH == "arm64" {
+			rs.Doc = "https://github.com/kubernetes/minikube/issues/19959"
+		}
+		return rs
+	}
+
+	// Check libvirt group membership before running any virsh commands.
+	// This avoids waiting on a potentially slow or hanging virsh call
+	// when we already know the user lacks the required permissions,
+	// and ensures a clear PR_KVM_USER_PERMISSION error is returned
+	// instead of the outer Status() timeout swallowing the real cause.
+	// See https://github.com/kubernetes/minikube/issues/23360
+	member, err := isCurrentUserLibvirtGroupMember()
+	if err != nil {
+		return registry.State{
+			Error:  fmt.Errorf("failed to check libvirt group membership:\n%v", err.Error()),
+			Reason: "PR_KVM_GROUP_CHECK_FAILED",
+			Fix:    "This is likely an internal error. Please check that your system's user/group database is working correctly.",
+			Doc:    docURL,
+		}
+	}
+	if !member {
+		return registry.State{
+			// keep the error message in sync with reason.providerIssues(Kind.ID: "PR_KVM_USER_PERMISSION") regexp
+			Error:  errors.New("libvirt group membership check failed:\nuser is not a member of the appropriate libvirt group"),
+			Reason: "PR_KVM_USER_PERMISSION",
+			Fix:    "Check that libvirtd is properly installed and that you are a member of the appropriate libvirt group (remember to relogin for group changes to take effect!)",
+			Doc:    docURL,
+		}
+	}
+
 	// Allow no more than 6 seconds for querying state
-	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
+	timeout := registry.Driver(driver.KVM2).ProbeTimeout
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
 	path, err := exec.LookPath("virsh")
@@ -127,33 +167,6 @@ func status() registry.State {
 	cmd.Env = append(os.Environ(), fmt.Sprintf("LIBVIRT_DEFAULT_URI=%s", defaultURI()))
 	out, err := cmd.CombinedOutput()
 
-	// If we fail to connect to libvirt, first check whether we're member of the libvirt group.
-	if err != nil {
-		member, err := isCurrentUserLibvirtGroupMember()
-		if err != nil {
-			return registry.State{
-				Installed: true,
-				Running:   true,
-				// keep the error messsage in sync with reason.providerIssues(Kind.ID: "PR_KVM_USER_PERMISSION") regexp
-				Error:  fmt.Errorf("libvirt group membership check failed:\n%v", err.Error()),
-				Reason: "PR_KVM_USER_PERMISSION",
-				Fix:    "Check that libvirtd is properly installed and that you are a member of the appropriate libvirt group (remember to relogin for group changes to take effect!)",
-				Doc:    docURL,
-			}
-		}
-		if !member {
-			return registry.State{
-				Installed: true,
-				Running:   true,
-				// keep the error messsage in sync with reason.providerIssues(Kind.ID: "PR_KVM_USER_PERMISSION") regexp
-				Error:  fmt.Errorf("libvirt group membership check failed:\nuser is not a member of the appropriate libvirt group"),
-				Reason: "PR_KVM_USER_PERMISSION",
-				Fix:    "Check that libvirtd is properly installed and that you are a member of the appropriate libvirt group (remember to relogin for group changes to take effect!)",
-				Doc:    docURL,
-			}
-		}
-	}
-
 	if ctx.Err() == context.DeadlineExceeded {
 		return registry.State{
 			Installed: true,
@@ -163,6 +176,7 @@ func status() registry.State {
 			Doc:       docURL,
 		}
 	}
+
 	if err != nil {
 		return registry.State{
 			Installed: true,

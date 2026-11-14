@@ -1,9 +1,12 @@
+%define debug_package %{nil}
+%define __strip /bin/true
 Name: minikube
 Version: --VERSION--
 Release: --REVISION--
 Summary: Run Kubernetes locally
 License: ASL 2.0
 Group: Development/Tools
+Vendor: The Kubernetes Authors
 URL: https://github.com/kubernetes/minikube
 
 # Needed for older versions of RPM

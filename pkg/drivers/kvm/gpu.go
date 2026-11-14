@@ -1,4 +1,4 @@
-// +build linux
+//go:build linux && amd64
 
 /*
 Copyright 2018 The Kubernetes Authors All rights reserved.
@@ -20,14 +20,14 @@ package kvm
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
-	"io/ioutil"
 	"os"
 	"path/filepath"
 	"strings"
 	"text/template"
 
-	"github.com/docker/machine/libmachine/log"
+	"k8s.io/minikube/pkg/libmachine/log"
 )
 
 var sysFsPCIDevicesPath = "/sys/bus/pci/devices/"
@@ -88,7 +88,7 @@ func getDevicesXML() (string, error) {
 		pciDevices = append(pciDevices, pciDevice)
 	}
 	if len(pciDevices) == 0 {
-		return "", fmt.Errorf("couldn't generate devices XML: parsing failed")
+		return "", errors.New("couldn't generate devices XML: parsing failed")
 	}
 	tmpl := template.Must(template.New("").Parse(devicesTmpl))
 	var devicesXML bytes.Buffer
@@ -105,7 +105,7 @@ func getDevicesXML() (string, error) {
 func getPassthroughableNVIDIADevices() ([]string, error) {
 
 	// Make sure the host supports IOMMU
-	iommuGroups, err := ioutil.ReadDir(sysKernelIOMMUGroupsPath)
+	iommuGroups, err := os.ReadDir(sysKernelIOMMUGroupsPath)
 	if err != nil {
 		return []string{}, fmt.Errorf("error reading %q: %v", sysKernelIOMMUGroupsPath, err)
 	}
@@ -114,7 +114,7 @@ func getPassthroughableNVIDIADevices() ([]string, error) {
 	}
 
 	// Get list of PCI devices
-	devices, err := ioutil.ReadDir(sysFsPCIDevicesPath)
+	devices, err := os.ReadDir(sysFsPCIDevicesPath)
 	if err != nil {
 		return []string{}, fmt.Errorf("error reading %q: %v", sysFsPCIDevicesPath, err)
 	}
@@ -123,7 +123,7 @@ func getPassthroughableNVIDIADevices() ([]string, error) {
 	found := false
 	for _, device := range devices {
 		vendorPath := filepath.Join(sysFsPCIDevicesPath, device.Name(), "vendor")
-		content, err := ioutil.ReadFile(vendorPath)
+		content, err := os.ReadFile(vendorPath)
 		if err != nil {
 			log.Infof("Error while reading %q: %v", vendorPath, err)
 			continue
@@ -143,10 +143,10 @@ func getPassthroughableNVIDIADevices() ([]string, error) {
 		}
 	}
 	if !found {
-		return []string{}, fmt.Errorf("no NVIDIA devices found")
+		return []string{}, errors.New("no NVIDIA devices found")
 	}
 	if len(unboundNVIDIADevices) == 0 {
-		return []string{}, fmt.Errorf("some NVIDIA devices were found but none of them were unbound. See instructions at https://minikube.sigs.k8s.io/docs/tutorials/nvidia_gpu/")
+		return []string{}, errors.New("some NVIDIA devices were found but none of them were unbound. See instructions at https://minikube.sigs.k8s.io/docs/tutorials/nvidia_gpu/")
 	}
 
 	// Make sure all the unbound devices are in IOMMU groups that only contain unbound devices.
@@ -161,7 +161,7 @@ func getPassthroughableNVIDIADevices() ([]string, error) {
 		}
 	}
 	if len(isolatedNVIDIADevices) == 0 {
-		return []string{}, fmt.Errorf("some unbound NVIDIA devices were found but they had other devices in their IOMMU group that were bound. See instructions at https://minikube.sigs.k8s.io/docs/tutorials/nvidia_gpu/")
+		return []string{}, errors.New("some unbound NVIDIA devices were found but they had other devices in their IOMMU group that were bound. See instructions at https://minikube.sigs.k8s.io/docs/tutorials/nvidia_gpu/")
 	}
 
 	return isolatedNVIDIADevices, nil
@@ -172,7 +172,7 @@ func getPassthroughableNVIDIADevices() ([]string, error) {
 func isIsolated(device string) bool {
 	// Find out the other devices in the same IOMMU group as one of our unbound device.
 	iommuGroupPath := filepath.Join(sysFsPCIDevicesPath, device, "iommu_group", "devices")
-	otherDevices, err := ioutil.ReadDir(iommuGroupPath)
+	otherDevices, err := os.ReadDir(iommuGroupPath)
 	if err != nil {
 		log.Infof("Error reading %q: %v", iommuGroupPath, err)
 		return false

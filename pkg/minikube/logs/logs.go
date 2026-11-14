@@ -25,11 +25,11 @@ import (
 	"os"
 	"os/exec"
 	"regexp"
-	"sort"
+	"slices"
 	"strings"
 
-	"github.com/pkg/errors"
 	"k8s.io/klog/v2"
+	"k8s.io/minikube/pkg/minikube/assets"
 	"k8s.io/minikube/pkg/minikube/audit"
 	"k8s.io/minikube/pkg/minikube/bootstrapper"
 	"k8s.io/minikube/pkg/minikube/command"
@@ -79,9 +79,8 @@ var importantPods = []string{
 	"coredns",
 	"kube-scheduler",
 	"kube-proxy",
-	"kubernetes-dashboard",
-	"storage-provisioner",
 	"kube-controller-manager",
+	"kindnet",
 }
 
 // logRunner is the subset of CommandRunner used for logging
@@ -105,7 +104,7 @@ func Follow(r cruntime.Manager, bs bootstrapper.Bootstrapper, cfg config.Cluster
 	cmd.Stdout = logOutput
 	cmd.Stderr = logOutput
 	if _, err := cr.RunCmd(cmd); err != nil {
-		return errors.Wrapf(err, "log follow")
+		return fmt.Errorf("log follow: %w", err)
 	}
 	return nil
 }
@@ -139,6 +138,9 @@ func FindProblems(r cruntime.Manager, bs bootstrapper.Bootstrapper, cfg config.C
 				problems = append(problems, l)
 			}
 		}
+		if err := scanner.Err(); err != nil {
+			klog.Warningf("failed to read output: %v", err)
+		}
 		if len(problems) > 0 {
 			pMap[name] = problems
 		}
@@ -163,7 +165,7 @@ func OutputProblems(problems map[string][]string, maxLines int, logOutput *os.Fi
 }
 
 // Output displays logs from multiple sources in tail(1) format
-func Output(r cruntime.Manager, bs bootstrapper.Bootstrapper, cfg config.ClusterConfig, runner command.Runner, lines int, logOutput *os.File) error {
+func Output(r cruntime.Manager, bs bootstrapper.Bootstrapper, cfg config.ClusterConfig, runner command.Runner, lines int, logOutput *os.File) {
 	cmds := logCommands(r, bs, cfg, lines, false)
 	cmds["kernel"] = "uptime && uname -a && grep PRETTY /etc/os-release"
 
@@ -174,21 +176,21 @@ func Output(r cruntime.Manager, bs bootstrapper.Bootstrapper, cfg config.Cluster
 
 	out.SetOutFile(logOutput)
 	defer out.SetOutFile(os.Stdout)
+	out.SetErrFile(logOutput)
+	defer out.SetErrFile(os.Stderr)
 
-	sort.Strings(names)
-	failed := []string{}
+	slices.Sort(names)
 	for i, name := range names {
 		if i > 0 {
-			out.Styled(style.Empty, "")
+			out.Styled(style.None, "")
 		}
-		out.Styled(style.Empty, "==> {{.name}} <==", out.V{"name": name})
+		out.Styled(style.None, "==> {{.name}} <==", out.V{"name": name})
 		var b bytes.Buffer
 		c := exec.Command("/bin/bash", "-c", cmds[name])
 		c.Stdout = &b
 		c.Stderr = &b
 		if rr, err := runner.RunCmd(c); err != nil {
-			klog.Errorf("command %s failed with error: %v output: %q", rr.Command(), err, rr.Output())
-			failed = append(failed, name)
+			out.Styled(style.None, fmt.Sprintf("command %s failed with error: %v", rr.Command(), err))
 			continue
 		}
 		l := ""
@@ -196,36 +198,34 @@ func Output(r cruntime.Manager, bs bootstrapper.Bootstrapper, cfg config.Cluster
 		for scanner.Scan() {
 			l += scanner.Text() + "\n"
 		}
-		out.Styled(style.Empty, l)
+		if err := scanner.Err(); err != nil {
+			l += fmt.Sprintf("failed to read output: %v", err)
+		}
+		out.Styled(style.None, l)
 	}
-
-	if len(failed) > 0 {
-		return fmt.Errorf("unable to fetch logs for: %s", strings.Join(failed, ", "))
-	}
-	return nil
 }
 
-// outputAudit displays the audit logs.
-func outputAudit(lines int) error {
-	out.Styled(style.Empty, "")
-	out.Styled(style.Empty, "==> Audit <==")
+// OutputAudit displays the audit logs.
+func OutputAudit(lines int) error {
+	out.Styled(style.None, "")
+	out.Styled(style.None, "==> Audit <==")
 	r, err := audit.Report(lines)
 	if err != nil {
 		return fmt.Errorf("failed to create audit report: %v", err)
 	}
-	out.Styled(style.Empty, r.ASCIITable())
+	out.Styled(style.None, r.ASCIITable())
 	return nil
 }
 
-// outputLastStart outputs the last start logs.
-func outputLastStart() error {
-	out.Styled(style.Empty, "")
-	out.Styled(style.Empty, "==> Last Start <==")
+// OutputLastStart outputs the last start logs.
+func OutputLastStart() error {
+	out.Styled(style.None, "")
+	out.Styled(style.None, "==> Last Start <==")
 	fp := localpath.LastStartLog()
 	f, err := os.Open(fp)
 	if os.IsNotExist(err) {
 		msg := fmt.Sprintf("Last start log file not found at %s", fp)
-		out.Styled(style.Empty, msg)
+		out.Styled(style.None, msg)
 		return nil
 	}
 	if err != nil {
@@ -233,35 +233,46 @@ func outputLastStart() error {
 	}
 	defer f.Close()
 	l := ""
-	s := bufio.NewScanner(f)
-	for s.Scan() {
-		l += s.Text() + "\n"
+	r := bufio.NewReader(f)
+	var s string
+	for {
+		s, err = r.ReadString('\n')
+		if err != nil {
+			break
+		}
+		l += s
 	}
-	out.Styled(style.Empty, l)
-	if err := s.Err(); err != nil {
-		return fmt.Errorf("failed to read file %s: %v", fp, err)
+	out.Styled(style.None, l)
+	if err == io.EOF {
+		return nil
 	}
-	return nil
+
+	return fmt.Errorf("failed to read file %s: %v", fp, err)
 }
 
 // OutputOffline outputs logs that don't need a running cluster.
 func OutputOffline(lines int, logOutput *os.File) {
 	out.SetOutFile(logOutput)
 	defer out.SetOutFile(os.Stdout)
-	if err := outputAudit(lines); err != nil {
+	out.SetErrFile(logOutput)
+	defer out.SetErrFile(os.Stderr)
+	if err := OutputAudit(lines); err != nil {
 		klog.Errorf("failed to output audit logs: %v", err)
 	}
-	if err := outputLastStart(); err != nil {
+	if err := OutputLastStart(); err != nil {
 		klog.Errorf("failed to output last start logs: %v", err)
 	}
 
-	out.Styled(style.Empty, "")
+	out.Styled(style.None, "")
 }
 
 // logCommands returns a list of commands that would be run to receive the anticipated logs
 func logCommands(r cruntime.Manager, bs bootstrapper.Bootstrapper, cfg config.ClusterConfig, length int, follow bool) map[string]string {
 	cmds := bs.LogCommands(cfg, bootstrapper.LogOptions{Lines: length, Follow: follow})
-	for _, pod := range importantPods {
+	pods := importantPods
+	addonPods := enabledAddonPods(cfg)
+	pods = append(pods, addonPods...)
+	for _, pod := range pods {
 		ids, err := r.ListContainers(cruntime.ListContainersOptions{Name: pod})
 		if err != nil {
 			klog.Errorf("Failed to list containers for %q: %v", pod, err)
@@ -281,4 +292,22 @@ func logCommands(r cruntime.Manager, bs bootstrapper.Bootstrapper, cfg config.Cl
 	cmds["container status"] = cruntime.ContainerStatusCommand()
 
 	return cmds
+}
+
+// enabledAddonPods returns the pod names for enabled addons
+// this does not currently include all addons, mostly just addons that we occasionally get users reporting issues with
+func enabledAddonPods(cfg config.ClusterConfig) []string {
+	addonPodMap := map[string]string{
+		"dashboard":           "kubernetes-dashboard",
+		"gcp-auth":            "gcp-auth",
+		"ingress":             "controller_ingress",
+		"storage-provisioner": "storage-provisioner",
+	}
+	addonsPods := []string{}
+	for addon, podName := range addonPodMap {
+		if assets.Addons[addon].IsEnabled(&cfg) {
+			addonsPods = append(addonsPods, podName)
+		}
+	}
+	return addonsPods
 }

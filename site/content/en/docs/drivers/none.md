@@ -38,6 +38,16 @@ This document is written for system integrators who wish to run minikube within 
 
 * minikube and the Kubernetes services it starts may interfere with other running software on the system. For instance, minikube will start and stop container runtimes via systemd, such as docker, containerd, cri-o.
 
+### Persistent storage
+
+* minikube expects that some mount points used for volumes are bind-mounted or symlinked to a persistent location:
+
+   * `/data`
+   * `/tmp/hostpath_pv`
+   * `/tmp/hostpath-provisioner`
+
+If you don't have a dedicated disk to use for these, you can use the `/var` partition which is _usually_ persistent.
+
 ### Data loss
 
 With the `none` driver, minikube will overwrite the following system paths:
@@ -58,7 +68,7 @@ As Kubernetes has full access to both your filesystem as well as your docker ima
 * Many `minikube` commands are not supported, such as: `dashboard`, `mount`, `ssh`
 * minikube with the `none` driver has a confusing permissions model, as some commands need to be run as root ("start"), and others by a regular user ("dashboard")
 * CoreDNS detects resolver loop, goes into CrashLoopBackOff - [#3511](https://github.com/kubernetes/minikube/issues/3511)
-* Some versions of Linux have a version of docker that is newer than what Kubernetes expects. To overwrite this, run minikube with the following parameters: `sudo -E minikube start --driver=none --kubernetes-version v1.11.8 --extra-config kubeadm.ignore-preflight-errors=SystemVerification`
+* Some versions of Linux have a version of docker that is newer than what Kubernetes expects. To overwrite this, run minikube with the following parameters: `minikube start --driver=none --kubernetes-version <k8sversion> --extra-config kubeadm.ignore-preflight-errors=SystemVerification` (the version must be one of the 3 latest minor Kubernetes versions supported by minikube)
 
 * [Full list of open 'none' driver issues](https://github.com/kubernetes/minikube/labels/co%2Fnone-driver)
 

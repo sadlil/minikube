@@ -75,7 +75,7 @@ var settings = []Setting{
 	},
 	{
 		name:        "cpus",
-		set:         SetInt,
+		set:         SetString,
 		validations: []setFn{IsValidCPUs},
 		callbacks:   []setFn{RequiresRestartMsg},
 	},
@@ -102,8 +102,9 @@ var settings = []Setting{
 		validations: []setFn{IsValidPath},
 	},
 	{
-		name: "kubernetes-version",
-		set:  SetString,
+		name:          "kubernetes-version",
+		set:           SetString,
+		validDefaults: supportedKubernetesVersions,
 	},
 	{
 		name:        "iso-url",
@@ -163,6 +164,23 @@ var settings = []Setting{
 		name: "native-ssh",
 		set:  SetBool,
 	},
+	{
+		name: config.Rootless,
+		set:  SetBool,
+	},
+	{
+		name: config.MaxAuditEntries,
+		set:  SetInt,
+	},
+	{
+		name:        config.DNSServers,
+		set:         SetStringSlice,
+		validations: []setFn{IsValidIPAddressSlice},
+	},
+	{
+		name: config.MDNS,
+		set:  SetBool,
+	},
 }
 
 // ConfigCmd represents the config command
@@ -171,7 +189,7 @@ var ConfigCmd = &cobra.Command{
 	Short: "Modify persistent configuration values",
 	Long: `config modifies minikube config files using subcommands like "minikube config set driver kvm2"
 Configurable fields: ` + "\n\n" + configurableFields(),
-	Run: func(cmd *cobra.Command, args []string) {
+	Run: func(cmd *cobra.Command, _ []string) {
 		if err := cmd.Help(); err != nil {
 			klog.ErrorS(err, "help")
 		}

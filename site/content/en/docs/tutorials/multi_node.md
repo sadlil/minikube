@@ -14,6 +14,10 @@ date: 2019-11-24
 - minikube 1.10.1 or higher
 - kubectl
 
+## Caveat
+
+Default [host-path volume provisioner]({{< ref "/docs/handbook/persistent_volumes" >}}) doesn't support multi-node clusters ([#12360](https://github.com/kubernetes/minikube/issues/12360)). To be able to provision or claim volumes in multi-node clusters, you could use [CSI Hostpath Driver]({{< ref "/docs/tutorials/volume_snapshots_and_csi" >}}) addon.
+
 ## Tutorial
 
 - Start a cluster with 2 nodes in the driver of your choice:
@@ -22,7 +26,7 @@ date: 2019-11-24
 minikube start --nodes 2 -p multinode-demo
 ```
 ```
-😄  [multinode-demo] minikube v1.18.1 on Opensuse-Tumbleweed 
+😄  [multinode-demo] minikube v1.18.1 on Opensuse-Tumbleweed
 ✨  Automatically selected the docker driver
 👍  Starting control plane node multinode-demo in cluster multinode-demo
 🔥  Creating docker container (CPUs=2, Memory=8000MB) ...
@@ -151,12 +155,55 @@ Hello from hello-695c67cf9c-frcvw (10.244.0.3)
 {{% tab hello-deployment.yaml %}}
 
 ```
-{{% readfile file="/docs/tutorials/includes/hello-deployment.yaml" %}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: hello
+spec:
+  replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 100%
+  selector:
+    matchLabels:
+      app: hello
+  template:
+    metadata:
+      labels:
+        app: hello
+    spec:
+      affinity:
+        # ⬇⬇⬇ This ensures pods will land on separate hosts
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchExpressions: [{ key: app, operator: In, values: [hello] }]
+              topologyKey: "kubernetes.io/hostname"
+      containers:
+        - name: hello-from
+          image: pbitty/hello-from:latest
+          ports:
+            - name: http
+              containerPort: 80
+      terminationGracePeriodSeconds: 1
 ```
 {{% /tab %}}
 {{% tab hello-svc.yaml %}}
 ```
-{{% readfile file="/docs/tutorials/includes/hello-svc.yaml" %}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: hello
+spec:
+  type: NodePort
+  selector:
+    app: hello
+  ports:
+    - protocol: TCP
+      nodePort: 31000
+      port: 80
+      targetPort: http
 ```
 {{% /tab %}}
 {{% /tabs %}}

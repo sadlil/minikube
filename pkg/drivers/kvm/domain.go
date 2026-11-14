@@ -1,4 +1,4 @@
-// +build linux
+//go:build linux && amd64
 
 /*
 Copyright 2016 The Kubernetes Authors All rights reserved.
@@ -20,83 +20,23 @@ package kvm
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"text/template"
 
-	libvirt "github.com/libvirt/libvirt-go"
-	"github.com/pkg/errors"
+	"k8s.io/minikube/pkg/libmachine/log"
+	"libvirt.org/go/libvirt"
 )
-
-const domainTmpl = `
-<domain type='kvm'>
-  <name>{{.MachineName}}</name>
-  <memory unit='MiB'>{{.Memory}}</memory>
-  <vcpu>{{.CPU}}</vcpu>
-  <features>
-    <acpi/>
-    <apic/>
-    <pae/>
-    {{if .Hidden}}
-    <kvm>
-      <hidden state='on'/>
-    </kvm>
-    {{end}}
-  </features>
-  <cpu mode='host-passthrough'>
-  {{if gt .NUMANodeCount 1}}
-  {{.NUMANodeXML}}
-  {{end}}
-  </cpu>
-  <os>
-    <type>hvm</type>
-    <boot dev='cdrom'/>
-    <boot dev='hd'/>
-    <bootmenu enable='no'/>
-  </os>
-  <devices>
-    <disk type='file' device='cdrom'>
-      <source file='{{.ISO}}'/>
-      <target dev='hdc' bus='scsi'/>
-      <readonly/>
-    </disk>
-    <disk type='file' device='disk'>
-      <driver name='qemu' type='raw' cache='default' io='threads' />
-      <source file='{{.DiskPath}}'/>
-      <target dev='hda' bus='virtio'/>
-    </disk>
-    <interface type='network'>
-      <source network='{{.PrivateNetwork}}'/>
-      <model type='virtio'/>
-    </interface>
-    <interface type='network'>
-      <source network='{{.Network}}'/>
-      <model type='virtio'/>
-    </interface>
-    <serial type='pty'>
-      <target port='0'/>
-    </serial>
-    <console type='pty'>
-      <target type='serial' port='0'/>
-    </console>
-    <rng model='virtio'>
-      <backend model='random'>/dev/random</backend>
-    </rng>
-    {{if .GPU}}
-    {{.DevicesXML}}
-    {{end}}
-  </devices>
-</domain>
-`
 
 func (d *Driver) getDomain() (*libvirt.Domain, *libvirt.Connect, error) {
 	conn, err := getConnection(d.ConnectionURI)
 	if err != nil {
-		return nil, nil, errors.Wrap(err, "getting domain")
+		return nil, nil, fmt.Errorf("failed opening libvirt connection: %w", err)
 	}
 
 	dom, err := conn.LookupDomainByName(d.MachineName)
 	if err != nil {
-		return nil, nil, errors.Wrap(err, "looking up domain")
+		return nil, nil, fmt.Errorf("failed looking up domain: %w", lvErr(err))
 	}
 
 	return dom, conn, nil
@@ -105,13 +45,17 @@ func (d *Driver) getDomain() (*libvirt.Domain, *libvirt.Connect, error) {
 func getConnection(connectionURI string) (*libvirt.Connect, error) {
 	conn, err := libvirt.NewConnect(connectionURI)
 	if err != nil {
-		return nil, errors.Wrap(err, "error connecting to libvirt socket.")
+		return nil, fmt.Errorf("failed connecting to libvirt socket: %w", lvErr(err))
 	}
 
 	return conn, nil
 }
 
 func closeDomain(dom *libvirt.Domain, conn *libvirt.Connect) error {
+	if dom == nil {
+		return errors.New("nil domain, cannot close")
+	}
+
 	if err := dom.Free(); err != nil {
 		return err
 	}
@@ -122,23 +66,27 @@ func closeDomain(dom *libvirt.Domain, conn *libvirt.Connect) error {
 	return err
 }
 
-func (d *Driver) createDomain() (*libvirt.Domain, error) {
-	// create the XML for the domain using our domainTmpl template
+// defineDomain defines the XML for the domain using our domainTmpl template
+func (d *Driver) defineDomain() (*libvirt.Domain, error) {
 	tmpl := template.Must(template.New("domain").Parse(domainTmpl))
 	var domainXML bytes.Buffer
 	if err := tmpl.Execute(&domainXML, d); err != nil {
-		return nil, errors.Wrap(err, "executing domain xml")
+		return nil, fmt.Errorf("executing domain xml: %w", err)
 	}
 	conn, err := getConnection(d.ConnectionURI)
 	if err != nil {
-		return nil, errors.Wrap(err, "error getting libvirt connection")
+		return nil, fmt.Errorf("failed opening libvirt connection: %w", err)
 	}
-	defer conn.Close()
+	defer func() {
+		if _, err := conn.Close(); err != nil {
+			log.Errorf("failed closing libvirt connection: %v", lvErr(err))
+		}
+	}()
 
-	// define the domain in libvirt using the generated XML
+	log.Infof("defining domain using XML: %v", domainXML.String())
 	dom, err := conn.DomainDefineXML(domainXML.String())
 	if err != nil {
-		return nil, errors.Wrapf(err, "error defining domain xml: %s", domainXML.String())
+		return nil, fmt.Errorf("error defining domain xml: %s: %w", domainXML.String(), err)
 	}
 
 	// save MAC address

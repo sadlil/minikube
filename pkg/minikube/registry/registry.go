@@ -18,11 +18,15 @@ package registry
 
 import (
 	"fmt"
+	"maps"
+	"slices"
 	"sync"
+	"time"
 
-	"github.com/docker/machine/libmachine/drivers"
+	"k8s.io/minikube/pkg/libmachine/drivers"
 
 	"k8s.io/minikube/pkg/minikube/config"
+	"k8s.io/minikube/pkg/minikube/run"
 )
 
 // Priority is how we determine what driver to default to
@@ -67,10 +71,11 @@ type Registry interface {
 type Configurator func(config.ClusterConfig, config.Node) (interface{}, error)
 
 // Loader is a function that loads a byte stream and creates a driver.
-type Loader func() drivers.Driver
+type Loader func(*run.CommandOptions) drivers.Driver
 
-// StatusChecker checks if a driver is available, offering a
-type StatusChecker func() State
+// StatusChecker checks if a driver is available. Implementations must return
+// within the driver's ProbeTimeout (e.g. via context.WithTimeout).
+type StatusChecker func(*run.CommandOptions) State
 
 // State is the current state of the driver and its dependencies
 type State struct {
@@ -80,9 +85,10 @@ type State struct {
 	NeedsImprovement bool // healthy but could be improved
 	Error            error
 
-	Reason string // A reason ID, propagated to reason.Kind.ID
-	Fix    string
-	Doc    string
+	Reason  string // A reason ID, propagated to reason.Kind.ID
+	Fix     string
+	Doc     string
+	Version string // Provider version
 }
 
 // DriverDef defines how to initialize and load a machine driver
@@ -99,7 +105,8 @@ type DriverDef struct {
 	// Init is a function that initializes a machine driver, if built-in to the minikube binary
 	Init Loader
 
-	// Status returns the installation status of the driver
+	// Status returns the installation status of the driver. When set, it must
+	// respect ProbeTimeout and return within that duration.
 	Status StatusChecker
 
 	// Default is whether this driver is selected by default or not (opt-in).
@@ -107,6 +114,15 @@ type DriverDef struct {
 
 	// Priority returns the prioritization for selecting a driver by default.
 	Priority Priority
+
+	// Parallel is true for drivers that can start multiple profiles in
+	// parallel. When false (default) all profiles using this driver are
+	// serialized.
+	Parallel bool
+
+	// ProbeTimeout is the maximum time Status may take. Required when Status
+	// is set; Register rejects a zero or negative value in that case.
+	ProbeTimeout time.Duration
 }
 
 // Empty returns true if the driver is nil
@@ -136,6 +152,10 @@ func (r *driverRegistry) Register(def DriverDef) error {
 	r.lock.Lock()
 	defer r.lock.Unlock()
 
+	if def.Status != nil && def.ProbeTimeout <= 0 {
+		return fmt.Errorf("%q: ProbeTimeout must be > 0", def.Name)
+	}
+
 	if _, ok := r.drivers[def.Name]; ok {
 		return fmt.Errorf("%q is already registered: %+v", def.Name, def)
 	}
@@ -156,11 +176,7 @@ func (r *driverRegistry) List() []DriverDef {
 	r.lock.RLock()
 	defer r.lock.RUnlock()
 
-	result := make([]DriverDef, 0, len(r.drivers))
-
-	for _, def := range r.drivers {
-		result = append(result, def)
-	}
+	result := slices.Collect(maps.Values(r.drivers))
 
 	return result
 }

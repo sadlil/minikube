@@ -17,7 +17,8 @@ limitations under the License.
 package config
 
 import (
-	"github.com/pkg/errors"
+	"fmt"
+
 	"github.com/spf13/cobra"
 	"k8s.io/minikube/pkg/minikube/config"
 	"k8s.io/minikube/pkg/minikube/exit"
@@ -31,12 +32,12 @@ var configSetCmd = &cobra.Command{
 	Short: "Sets an individual value in a minikube config file",
 	Long: `Sets the PROPERTY_NAME config value to PROPERTY_VALUE
 	These values can be overwritten by flags or environment variables at runtime.`,
-	Run: func(cmd *cobra.Command, args []string) {
+	Run: func(_ *cobra.Command, args []string) {
 		if len(args) < 2 {
 			exit.Message(reason.Usage, "not enough arguments ({{.ArgCount}}).\nusage: minikube config set PROPERTY_NAME PROPERTY_VALUE", out.V{"ArgCount": len(args)})
 		}
 		if len(args) > 2 {
-			exit.Message(reason.Usage, "toom any arguments ({{.ArgCount}}).\nusage: minikube config set PROPERTY_NAME PROPERTY_VALUE", out.V{"ArgCount": len(args)})
+			exit.Message(reason.Usage, "too many arguments ({{.ArgCount}}).\nusage: minikube config set PROPERTY_NAME PROPERTY_VALUE", out.V{"ArgCount": len(args)})
 		}
 		err := Set(args[0], args[1])
 		if err != nil {
@@ -53,28 +54,28 @@ func init() {
 func Set(name string, value string) error {
 	s, err := findSetting(name)
 	if err != nil {
-		return errors.Wrapf(err, "find settings for %q value of %q", name, value)
+		return fmt.Errorf("find settings for %q value of %q: %w", name, value, err)
 	}
 	// Validate the new value
-	err = run(name, value, s.validations)
+	err = invoke(name, value, s.validations)
 	if err != nil {
-		return errors.Wrapf(err, "run validations for %q with value of %q", name, value)
+		return fmt.Errorf("run validations for %q with value of %q: %w", name, value, err)
 	}
 
 	// Set the value
 	cc, err := config.ReadConfig(localpath.ConfigFile())
 	if err != nil {
-		return errors.Wrapf(err, "read config file %q", localpath.ConfigFile())
+		return fmt.Errorf("read config file %q: %w", localpath.ConfigFile(), err)
 	}
 	err = s.set(cc, name, value)
 	if err != nil {
-		return errors.Wrapf(err, "set")
+		return fmt.Errorf("set: %w", err)
 	}
 
 	// Run any callbacks for this property
-	err = run(name, value, s.callbacks)
+	err = invoke(name, value, s.callbacks)
 	if err != nil {
-		return errors.Wrapf(err, "run callbacks for %q with value of %q", name, value)
+		return fmt.Errorf("run callbacks for %q with value of %q: %w", name, value, err)
 	}
 
 	// Write the value

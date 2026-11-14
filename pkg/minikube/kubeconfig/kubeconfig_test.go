@@ -17,9 +17,9 @@ limitations under the License.
 package kubeconfig
 
 import (
-	"io/ioutil"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"testing"
 
@@ -95,14 +95,14 @@ clusters:
   name: minikube
 contexts:
 - context:
-    cluster: la-croix
-    user: la-croix
-  name: la-croix
-current-context: la-croix
+    cluster: minikube
+    user: minikube
+  name: minikube
+current-context: minikube
 kind: Config
 preferences: {}
 users:
-- name: la-croix
+- name: minikube
   user:
     client-certificate: /home/la-croix/apiserver.crt
     client-key: /home/la-croix/apiserver.key
@@ -117,14 +117,14 @@ clusters:
   name: minikube
 contexts:
 - context:
-    cluster: la-croix
-    user: la-croix
-  name: la-croix
-current-context: la-croix
+    cluster: minikube
+    user: minikube
+  name: minikube
+current-context: minikube
 kind: Config
 preferences: {}
 users:
-- name: la-croix
+- name: minikube
   user:
     client-certificate: /home/la-croix/apiserver.crt
     client-key: /home/la-croix/apiserver.key
@@ -139,14 +139,14 @@ clusters:
   name: minikube
 contexts:
 - context:
-    cluster: la-croix
-    user: la-croix
-  name: la-croix
-current-context: la-croix
+    cluster: minikube
+    user: minikube
+  name: minikube
+current-context: minikube
 kind: Config
 preferences: {}
 users:
-- name: la-croix
+- name: minikube
   user:
     client-certificate: /home/la-croix/apiserver.crt
     client-key: /home/la-croix/apiserver.key
@@ -177,6 +177,70 @@ current-context: minikube
 kind: Config
 preferences: {}
 users:
+- name: minikube
+  user:
+    client-certificate: /home/la-croix/.minikube/profiles/minikube/client.crt
+    client-key: /home/la-croix/.minikube/profiles/minikube/client.key
+`)
+
+var kubeConfigMissingContext = []byte(`
+apiVersion: v1
+clusters:
+- cluster:
+    certificate-authority: /home/la-croix/apiserver.crt
+    server: https://192.168.10.100:8443
+  name: la-croix
+- cluster:
+    certificate-authority: /home/la-croix/.minikube/ca.crt
+    server: https://192.168.10.100:8080
+  name: minikube
+contexts:
+- context:
+    cluster: la-croix
+    user: la-croix
+  name: la-croix
+current-context: la-croix
+kind: Config
+preferences: {}
+users:
+- name: la-croix
+  user:
+    client-certificate: /home/la-croix/apiserver.crt
+    client-key: /home/la-croix/apiserver.key
+- name: minikube
+  user:
+    client-certificate: /home/la-croix/.minikube/profiles/minikube/client.crt
+    client-key: /home/la-croix/.minikube/profiles/minikube/client.key
+`)
+
+var kubeConfigFixedContext = []byte(`
+apiVersion: v1
+clusters:
+- cluster:
+    certificate-authority: /home/la-croix/apiserver.crt
+    server: https://192.168.10.100:8443
+  name: la-croix
+- cluster:
+    certificate-authority: /home/la-croix/.minikube/ca.crt
+    server: https://192.168.10.100:8080
+  name: minikube
+contexts:
+- context:
+    cluster: la-croix
+    user: la-croix
+  name: la-croix
+- context:
+    cluster: minikube
+    user: minikube
+  name: minikube
+current-context: minikube
+kind: Config
+preferences: {}
+users:
+- name: la-croix
+  user:
+    client-certificate: /home/la-croix/apiserver.crt
+    client-key: /home/la-croix/apiserver.key
 - name: minikube
   user:
     client-certificate: /home/la-croix/.minikube/profiles/minikube/client.crt
@@ -229,24 +293,15 @@ func TestUpdate(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.description, func(t *testing.T) {
-			tmpDir, err := ioutil.TempDir("", "")
-			if err != nil {
-				t.Fatalf("Error making temp directory %v", err)
-			}
-			defer func() { // clean up tempdir
-				err := os.RemoveAll(tmpDir)
-				if err != nil {
-					t.Errorf("failed to clean up temp folder  %q", tmpDir)
-				}
-			}()
+			tmpDir := t.TempDir()
 
 			test.cfg.SetPath(filepath.Join(tmpDir, "kubeconfig"))
 			if len(test.existingCfg) != 0 {
-				if err := ioutil.WriteFile(test.cfg.filePath(), test.existingCfg, 0600); err != nil {
+				if err := os.WriteFile(test.cfg.filePath(), test.existingCfg, 0600); err != nil {
 					t.Fatalf("WriteFile: %v", err)
 				}
 			}
-			err = Update(test.cfg)
+			err := Update(test.cfg)
 			if err != nil && !test.err {
 				t.Errorf("Got unexpected error: %v", err)
 			}
@@ -325,7 +380,6 @@ func TestVerifyEndpoint(t *testing.T) {
 	}
 
 	for _, test := range tests {
-		test := test
 		t.Run(test.description, func(t *testing.T) {
 			t.Parallel()
 			configFilename := tempFile(t, test.existing)
@@ -402,10 +456,9 @@ func TestUpdateIP(t *testing.T) {
 		},
 	}
 
-	os.Setenv(localpath.MinikubeHome, "/home/la-croix")
+	t.Setenv(localpath.MinikubeHome, "/home/la-croix")
 
 	for _, test := range tests {
-		test := test
 		t.Run(test.description, func(t *testing.T) {
 			t.Parallel()
 			configFilename := tempFile(t, test.existing)
@@ -437,6 +490,26 @@ func TestUpdateIP(t *testing.T) {
 	}
 }
 
+func TestMissingContext(t *testing.T) {
+	t.Setenv(localpath.MinikubeHome, "/home/la-croix")
+	configFilename := tempFile(t, kubeConfigMissingContext)
+	defer os.Remove(configFilename)
+	if _, err := UpdateEndpoint("minikube", "192.168.10.100", 8080, configFilename, nil); err != nil {
+		t.Fatal(err)
+	}
+	actual, err := readOrNew(configFilename)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected, err := decode(kubeConfigFixedContext)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !configEquals(actual, expected) {
+		t.Fatalf("configs did not match: Actual:\n%+v\n Expected:\n%+v", actual, expected)
+	}
+}
+
 func TestEmptyConfig(t *testing.T) {
 	tmp := tempFile(t, []byte{})
 	defer os.Remove(tmp)
@@ -460,16 +533,7 @@ func TestEmptyConfig(t *testing.T) {
 }
 
 func TestNewConfig(t *testing.T) {
-	dir, err := ioutil.TempDir("", ".kube")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() {
-		err := os.RemoveAll(dir)
-		if err != nil {
-			t.Errorf("Failed to remove dir %q: %v", dir, err)
-		}
-	}()
+	dir := t.TempDir()
 
 	// setup minikube config
 	expected := api.NewConfig()
@@ -477,8 +541,7 @@ func TestNewConfig(t *testing.T) {
 
 	// write actual
 	filename := filepath.Join(dir, "config")
-	err = writeToFile(expected, filename)
-	if err != nil {
+	if err := writeToFile(expected, filename); err != nil {
 		t.Fatal(err)
 	}
 
@@ -528,7 +591,7 @@ func Test_Endpoint(t *testing.T) {
 				t.Errorf("got hostname = %q, want hostname = %q", hostname, test.hostname)
 			}
 			if port != test.port {
-				t.Errorf("got port = %q, want port = %q", port, test.port)
+				t.Errorf("got port = %d, want port = %d", port, test.port)
 			}
 		})
 	}
@@ -537,7 +600,7 @@ func Test_Endpoint(t *testing.T) {
 // tempFile creates a temporary with the provided bytes as its contents.
 // The caller is responsible for deleting file after use.
 func tempFile(t *testing.T, data []byte) string {
-	tmp, err := ioutil.TempFile("", "kubeconfig")
+	tmp, err := os.CreateTemp("", "kubeconfig")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -560,7 +623,7 @@ func minikubeConfig(config *api.Config) {
 	// cluster
 	clusterName := "minikube"
 	cluster := api.NewCluster()
-	cluster.Server = "https://192.168.99.100:" + strconv.Itoa(constants.APIServerPort)
+	cluster.Server = "https://192.168.59.100:" + strconv.Itoa(constants.APIServerPort)
 	cluster.CertificateAuthority = "/home/tux/.minikube/apiserver.crt"
 	config.Clusters[clusterName] = cluster
 
@@ -703,7 +766,20 @@ func contextEquals(aContext, bContext *api.Context) bool {
 	return true
 }
 
+func equalPaths(a, b string) bool {
+	return filepath.Clean(filepath.ToSlash(a)) == filepath.Clean(filepath.ToSlash(b))
+}
+
 func TestGetKubeConfigPath(t *testing.T) {
+	sep := string(os.PathListSeparator)
+
+	// Ensure $HOME expands sensibly on Windows where HOME may be unset.
+	if runtime.GOOS == "windows" && os.Getenv("HOME") == "" {
+		if h, err := os.UserHomeDir(); err == nil && h != "" {
+			t.Setenv("HOME", h)
+		}
+	}
+
 	var tests = []struct {
 		input string
 		want  string
@@ -713,15 +789,17 @@ func TestGetKubeConfigPath(t *testing.T) {
 			want:  "/home/fake/.kube/.kubeconfig",
 		},
 		{
-			input: "/home/fake/.kube/.kubeconfig:/home/fake2/.kubeconfig",
+			// multiple entries, first should be chosen
+			input: "/home/fake/.kube/.kubeconfig" + sep + "/home/fake2/.kubeconfig",
 			want:  "/home/fake/.kube/.kubeconfig",
 		},
 		{
-			input: ":/home/fake/.kube/.kubeconfig:/home/fake2/.kubeconfig",
+			// leading empty entry should be skipped
+			input: sep + "/home/fake/.kube/.kubeconfig" + sep + "/home/fake2/.kubeconfig",
 			want:  "/home/fake/.kube/.kubeconfig",
 		},
 		{
-			input: ":",
+			input: sep,
 			want:  "$HOME/.kube/config",
 		},
 		{
@@ -731,9 +809,22 @@ func TestGetKubeConfigPath(t *testing.T) {
 	}
 
 	for _, test := range tests {
-		os.Setenv(clientcmd.RecommendedConfigPathEnvVar, test.input)
-		if result := PathFromEnv(); result != os.ExpandEnv(test.want) {
-			t.Errorf("Expected first split chunk, got: %s", result)
+		t.Setenv(clientcmd.RecommendedConfigPathEnvVar, test.input)
+		result := PathFromEnv()
+		expandedWant := os.ExpandEnv(test.want)
+		if !equalPaths(result, expandedWant) {
+			t.Errorf("Expected first split chunk, got: %s (want %s)", result, expandedWant)
 		}
+	}
+}
+
+func TestSettingsFilePathUninitialized(t *testing.T) {
+	kcs := &Settings{}
+	// Verify that calling filePath() on an uninitialized Settings struct
+	// does not panic and correctly falls back to PathFromEnv().
+	result := kcs.filePath()
+	expected := PathFromEnv()
+	if result != expected {
+		t.Errorf("filePath() on uninitialized settings = %q; want %q", result, expected)
 	}
 }

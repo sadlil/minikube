@@ -18,15 +18,20 @@ package cluster
 
 import (
 	"fmt"
-	"os"
 	"os/exec"
-	"sort"
+	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 
-	"github.com/pkg/errors"
+	"github.com/spf13/viper"
 	"k8s.io/klog/v2"
 	"k8s.io/minikube/pkg/minikube/command"
+	"k8s.io/minikube/pkg/minikube/constants"
+	"k8s.io/minikube/pkg/minikube/exit"
+	"k8s.io/minikube/pkg/minikube/localpath"
+	"k8s.io/minikube/pkg/minikube/reason"
+	"k8s.io/minikube/pkg/util/lock"
 )
 
 // MountConfig defines the options available to the Mount command
@@ -43,8 +48,6 @@ type MountConfig struct {
 	MSize int
 	// Port is the port to connect to on the host
 	Port int
-	// Mode is the file permissions to set the mount to (octals)
-	Mode os.FileMode
 	// Extra mount options. See https://www.kernel.org/doc/Documentation/filesystems/9p.txt
 	Options map[string]string
 }
@@ -57,8 +60,10 @@ type mountRunner interface {
 const (
 	// MountErrorUnknown failed with unknown error
 	MountErrorUnknown = iota
-	// MountErrorConnect
+	// MountErrorConnect failed to connect
 	MountErrorConnect
+	// MountErrorChmod failed to chmod
+	MountErrorChmod
 )
 
 // MountError wrapper around errors in the `Mount` function
@@ -74,13 +79,13 @@ func (m *MountError) Error() string {
 }
 
 // Mount runs the mount command from the 9p client on the VM to the 9p server on the host
-func Mount(r mountRunner, source string, target string, c *MountConfig) error {
+func Mount(r mountRunner, source string, target string, c *MountConfig, pid int) error {
 	if err := Unmount(r, target); err != nil {
-		return &MountError{ErrorType: MountErrorUnknown, UnderlyingError: errors.Wrap(err, "umount")}
+		return &MountError{ErrorType: MountErrorUnknown, UnderlyingError: fmt.Errorf("umount: %w", err)}
 	}
 
-	if _, err := r.RunCmd(exec.Command("/bin/bash", "-c", fmt.Sprintf("sudo mkdir -m %o -p %s", c.Mode, target))); err != nil {
-		return &MountError{ErrorType: MountErrorUnknown, UnderlyingError: errors.Wrap(err, "create folder pre-mount")}
+	if _, err := r.RunCmd(exec.Command("/bin/bash", "-c", fmt.Sprintf("sudo mkdir -p %s", target))); err != nil {
+		return &MountError{ErrorType: MountErrorUnknown, UnderlyingError: fmt.Errorf("create folder pre-mount: %w", err)}
 	}
 
 	rr, err := r.RunCmd(exec.Command("/bin/bash", "-c", mntCmd(source, target, c)))
@@ -88,7 +93,12 @@ func Mount(r mountRunner, source string, target string, c *MountConfig) error {
 		if strings.Contains(rr.Stderr.String(), "Connection timed out") {
 			return &MountError{ErrorType: MountErrorConnect, UnderlyingError: err}
 		}
-		return &MountError{ErrorType: MountErrorUnknown, UnderlyingError: errors.Wrapf(err, "mount with cmd %s ", rr.Command())}
+		return &MountError{ErrorType: MountErrorUnknown, UnderlyingError: fmt.Errorf("mount with cmd %s : %w", rr.Command(), err)}
+	}
+
+	profile := viper.GetString("profile")
+	if err := lock.AppendToFile(filepath.Join(localpath.Profile(profile), constants.MountProcessFileName), []byte(fmt.Sprintf(" %s", strconv.Itoa(pid))), 0o644); err != nil {
+		exit.Error(reason.HostMountPid, "Error writing mount pid", err)
 	}
 
 	klog.Infof("mount successful: %q", rr.Output())
@@ -155,16 +165,16 @@ func mntCmd(source string, target string, c *MountConfig) string {
 		}
 		opts = append(opts, fmt.Sprintf("%s=%s", k, v))
 	}
-	sort.Strings(opts)
+	slices.Sort(opts)
 	return fmt.Sprintf("sudo mount -t %s -o %s %s %s", c.Type, strings.Join(opts, ","), source, target)
 }
 
 // Unmount unmounts a path
 func Unmount(r mountRunner, target string) error {
 	// grep because findmnt will also display the parent!
-	c := exec.Command("/bin/bash", "-c", fmt.Sprintf("[ \"x$(findmnt -T %s | grep %s)\" != \"x\" ] && sudo umount -f %s || echo ", target, target, target))
+	c := exec.Command("/bin/bash", "-c", fmt.Sprintf("[ \"x$(findmnt -T %s | grep %s)\" != \"x\" ] && sudo umount -f -l %s || echo ", target, target, target))
 	if _, err := r.RunCmd(c); err != nil {
-		return errors.Wrap(err, "unmount")
+		return fmt.Errorf("unmount: %w", err)
 	}
 	klog.Infof("unmount for %s ran successfully", target)
 	return nil

@@ -1,10 +1,13 @@
 [build]
 base = "site/"
 publish = "site/public/"
-command = "pwd && cd themes/docsy && git submodule update -f --init && cd ../.. && hugo"
+command = "pwd && cd themes/docsy && npm install && git submodule update -f --init && cd ../.. && hugo"
 
 [build.environment]
-HUGO_VERSION = "0.83.1"
+# node Active LTS
+NODE_VERSION = "24.22.2"
+# https://github.com/gohugoio/hugo/releases
+HUGO_VERSION = "v0.169.0"
 
 [context.production.environment]
 HUGO_ENV = "production"

@@ -20,7 +20,6 @@ import (
 	"bytes"
 	"flag"
 	"fmt"
-	"io/ioutil"
 	"log"
 	"os"
 	"path/filepath"
@@ -32,16 +31,17 @@ var (
 	boilerplatedir = flag.String("boilerplate-dir", ".", "Boilerplate directory for boilerplate files")
 	rootdir        = flag.String("rootdir", "../../", "Root directory to examine")
 	verbose        = flag.Bool("v", false, "Verbose")
-	skippedPaths   = regexp.MustCompile(`Godeps|third_party|_gopath|_output|\.git|cluster/env.sh|vendor|test/e2e/generated/bindata.go|site/themes/docsy|test/integration/testdata`)
+	skippedPaths   = regexp.MustCompile(`Godeps|third_party|_gopath|_output|\.git|cluster/env.sh|vendor|test/e2e/generated/bindata.go|site/themes/docsy|test/integration/testdata|hack/benchmark/image-build/minikube-image-benchmark|hack/benchmark/time-to-k8s/time-to-k8s-repo`)
 	windowdNewLine = regexp.MustCompile(`\r`)
 	txtExtension   = regexp.MustCompile(`\.txt`)
-	goBuildTag     = regexp.MustCompile(`(?m)^(// \+build.*\n)+\n`)
+	goBuildTag     = regexp.MustCompile(`(?m)^(//go:build.*\n)+\n`)
 	shebang        = regexp.MustCompile(`(?m)^(#!.*\n)\n*`)
 	copyright      = regexp.MustCompile(`Copyright YEAR`)
 	copyrightReal  = regexp.MustCompile(`Copyright \d{4}`)
 )
 
 func main() {
+	flag.Parse()
 	refs, err := extensionToBoilerplate(*boilerplatedir)
 	if err != nil {
 		log.Fatal(err)
@@ -75,7 +75,7 @@ func extensionToBoilerplate(dir string) (map[string][]byte, error) {
 	files, _ := filepath.Glob(dir + "/*.txt")
 	for _, filename := range files {
 		extension := strings.ToLower(filepath.Ext(txtExtension.ReplaceAllString(filename, "")))
-		data, err := ioutil.ReadFile(filename)
+		data, err := os.ReadFile(filename)
 		if err != nil {
 			return nil, err
 		}
@@ -97,7 +97,7 @@ func extensionToBoilerplate(dir string) (map[string][]byte, error) {
 
 // filePasses checks whether the processed file is valid. Returning false means that the file does not the proper boilerplate template.
 func filePasses(filename string, expectedBoilerplate []byte) (bool, error) {
-	data, err := ioutil.ReadFile(filename)
+	data, err := os.ReadFile(filename)
 	if err != nil {
 		return false, err
 	}
@@ -136,7 +136,7 @@ func filePasses(filename string, expectedBoilerplate []byte) (bool, error) {
 // filesToCheck returns the list of the filers that will be checked for the boilerplate.
 func filesToCheck(rootDir string, extensions map[string][]byte) ([]string, error) {
 	var outFiles []string
-	err := filepath.Walk(rootDir, func(path string, info os.FileInfo, err error) error {
+	err := filepath.Walk(rootDir, func(path string, info os.FileInfo, _ error) error {
 		// remove current workdir from the beginning of the path in case it matches the skipped path
 		cwd, _ := os.Getwd()
 		// replace "\" with "\\" for windows style path

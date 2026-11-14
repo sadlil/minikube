@@ -1,4 +1,4 @@
-// +build !windows
+//go:build !windows
 
 /*
 Copyright 2020 The Kubernetes Authors All rights reserved.
@@ -20,27 +20,26 @@ package schedule
 
 import (
 	"fmt"
-	"io/ioutil"
 	"os"
 	"strconv"
 	"time"
 
 	"github.com/VividCortex/godaemon"
-	"github.com/pkg/errors"
 	"k8s.io/klog/v2"
 	"k8s.io/minikube/pkg/minikube/config"
 	"k8s.io/minikube/pkg/minikube/localpath"
 	"k8s.io/minikube/pkg/minikube/mustload"
+	"k8s.io/minikube/pkg/minikube/run"
 )
 
 // KillExisting kills existing scheduled stops by looking up the PID
 // of the scheduled stop from the PID file saved for the profile and killing the process
-func KillExisting(profiles []string) {
+func KillExisting(profiles []string, options *run.CommandOptions) {
 	for _, profile := range profiles {
 		if err := killPIDForProfile(profile); err != nil {
-			klog.Errorf("error killng PID for profile %s: %v", profile, err)
+			klog.Warningf("error killng PID for profile %s: %v", profile, err)
 		}
-		_, cc := mustload.Partial(profile)
+		_, cc := mustload.Partial(profile, options)
 		cc.ScheduledStop = nil
 		if err := config.SaveProfile(profile, cc); err != nil {
 			klog.Errorf("error saving profile for profile %s: %v", profile, err)
@@ -50,7 +49,7 @@ func KillExisting(profiles []string) {
 
 func killPIDForProfile(profile string) error {
 	file := localpath.PID(profile)
-	f, err := ioutil.ReadFile(file)
+	f, err := os.ReadFile(file)
 	if os.IsNotExist(err) {
 		return nil
 	}
@@ -60,24 +59,24 @@ func killPIDForProfile(profile string) error {
 		}
 	}()
 	if err != nil {
-		return errors.Wrapf(err, "reading %s", file)
+		return fmt.Errorf("reading %s: %w", file, err)
 	}
 	pid, err := strconv.Atoi(string(f))
 	if err != nil {
-		return errors.Wrapf(err, "converting %s to int", f)
+		return fmt.Errorf("converting %s to int: %w", f, err)
 	}
 	p, err := os.FindProcess(pid)
 	if err != nil {
-		return errors.Wrap(err, "finding process")
+		return fmt.Errorf("finding process: %w", err)
 	}
 	klog.Infof("killing process %v as it is an old scheduled stop", pid)
 	if err := p.Kill(); err != nil {
-		return errors.Wrapf(err, "killing %v", pid)
+		return fmt.Errorf("killing %v: %w", pid, err)
 	}
 	return nil
 }
 
-func daemonize(profiles []string, duration time.Duration) error {
+func daemonize(profiles []string, _ time.Duration, _ *run.CommandOptions) error {
 	_, _, err := godaemon.MakeDaemon(&godaemon.DaemonAttr{})
 	if err != nil {
 		return err
@@ -90,7 +89,7 @@ func daemonize(profiles []string, duration time.Duration) error {
 func savePIDs(pid int, profiles []string) error {
 	for _, p := range profiles {
 		file := localpath.PID(p)
-		if err := ioutil.WriteFile(file, []byte(fmt.Sprintf("%v", pid)), 0600); err != nil {
+		if err := os.WriteFile(file, []byte(fmt.Sprintf("%v", pid)), 0600); err != nil {
 			return err
 		}
 	}

@@ -22,8 +22,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/pkg/errors"
-	"k8s.io/kubernetes/cmd/kubeadm/app/features"
+	"k8s.io/minikube/third_party/kubeadm/app/features"
 )
 
 // supportedFG indicates whether a feature name is supported by the bootstrapper
@@ -40,7 +39,7 @@ func supportedFG(featureName string) bool {
 func parseFeatureArgs(featureGates string) (map[string]bool, string, error) {
 	kubeadmFeatureArgs := map[string]bool{}
 	componentFeatureArgs := ""
-	for _, s := range strings.Split(featureGates, ",") {
+	for s := range strings.SplitSeq(featureGates, ",") {
 		if len(s) == 0 {
 			continue
 		}
@@ -60,7 +59,7 @@ func parseFeatureArgs(featureGates string) (map[string]bool, string, error) {
 
 		boolValue, err := strconv.ParseBool(v)
 		if err != nil {
-			return nil, "", errors.Wrapf(err, "failed to convert bool value \"%v\"", v)
+			return nil, "", fmt.Errorf("failed to convert bool value \"%v\": %w", v, err)
 		}
 		kubeadmFeatureArgs[k] = boolValue
 	}

@@ -26,13 +26,24 @@
 # EXTRA_TEST_ARGS: additional flags to pass into go test
 # JOB_NAME: the name of the logfile and check name to update on github
 
+set -x
+
 readonly OS_ARCH="${OS}-${ARCH}"
 readonly TEST_ROOT="${HOME}/minikube-integration"
-readonly TEST_HOME="${TEST_ROOT}/${OS_ARCH}-${DRIVER}-${CONTAINER_RUNTIME}-${MINIKUBE_LOCATION}-$$-${COMMIT}"
+readonly TEST_HOME="${TEST_ROOT}/${MINIKUBE_LOCATION}-$$"
+
+# Set up isolated gsutil state directory to avoid resumable upload/download conflicts
+mkdir -p "${TEST_HOME}/.gsutil_state"
+cat <<EOF > "${TEST_HOME}/.gsutil_boto"
+[GSUtil]
+state_dir = ${TEST_HOME}/.gsutil_state
+EOF
+export BOTO_PATH="${TEST_HOME}/.gsutil_boto:${HOME}/.boto"
 
 export GOPATH="$HOME/go"
 export KUBECONFIG="${TEST_HOME}/kubeconfig"
 export PATH=$PATH:"/usr/local/bin/:/usr/local/go/bin/:$GOPATH/bin"
+export MINIKUBE_SUPPRESS_DOCKER_PERFORMANCE=true
 
 readonly TIMEOUT=${1:-120m}
 
@@ -76,22 +87,33 @@ function retry_github_status() {
 }
 
 if [ "$(uname)" = "Darwin" ]; then
+  if [ "$ARCH" = "arm64" ]; then
+    export PATH=$PATH:/opt/homebrew/bin
+  fi
+
   if ! bash setup_docker_desktop_macos.sh; then
     retry_github_status "${COMMIT}" "${JOB_NAME}" "failure" "${access_token}" "${public_log_url}" "Jenkins: docker failed to start"
     exit 1
   fi
 fi
 
+## set sysctl params for inotify, to avoid "too many open files" errors
+## ref: https://cloud.google.com/kubernetes-engine/distributed-cloud/bare-metal/docs/installing/configure-os/ubuntu
+if [ "$OS" == "linux" ]; then
+  sudo sysctl -w fs.inotify.max_user_instances=8192
+  sudo sysctl -w fs.inotify.max_user_watches=524288
+fi
+
 # We need pstree for the restart cronjobs
 if [ "$(uname)" != "Darwin" ]; then
-  sudo apt-get -y install lsof psmisc
+  sudo apt-get -y install lsof psmisc dnsutils
 else
   brew install pstree coreutils pidof
   ln -s /usr/local/bin/gtimeout /usr/local/bin/timeout || true
 fi
 
-# installing golang so we could do go get for gopogh
-./installers/check_install_golang.sh "1.16.7" "/usr/local" || true
+# installing golang so we can go install gopogh
+./installers/check_install_golang.sh "/usr/local" || true
 
 # install docker and kubectl if not present
 sudo ARCH="$ARCH" ./installers/check_install_docker.sh || true
@@ -99,10 +121,18 @@ sudo ARCH="$ARCH" ./installers/check_install_docker.sh || true
 # install gotestsum if not present
 GOROOT="/usr/local/go" ./installers/check_install_gotestsum.sh || true
 
-# let's just clean all docker artifacts up
-docker system prune --force --volumes || true
-docker system df || true
+# install cron jobs
+if [ "$OS" == "linux" ]; then
+  source ./installers/check_install_linux_crons.sh
+else
+  source ./installers/check_install_osx_crons.sh
+fi
 
+# let's just clean all docker artifacts up
+docker system prune -a --volumes -f || true
+docker system df || true
+# read only token, never expires
+docker login -u minikubebot -p "$DOCKERHUB_READONLY_TOKEN"
 echo ">> Starting at $(date)"
 echo ""
 echo "arch:      ${OS_ARCH}"
@@ -111,7 +141,6 @@ echo "driver:    ${DRIVER}"
 echo "runtime:   ${CONTAINER_RUNTIME}"
 echo "job:       ${JOB_NAME}"
 echo "test home: ${TEST_HOME}"
-echo "sudo:      ${SUDO_PREFIX}"
 echo "kernel:    $(uname -v)"
 echo "uptime:    $(uptime)"
 # Setting KUBECONFIG prevents the version check from erroring out due to permission issues
@@ -127,6 +156,12 @@ case "${DRIVER}" in
   ;;
   virtualbox)
     echo "vbox:      $(vboxmanage --version)"
+  ;;
+  vfkit)
+    echo "vfkit:     $(vfkit --version)"
+  ;;
+  krunkit)
+    echo "krunkit:   $(krunkit --version)"
   ;;
 esac
 
@@ -149,18 +184,17 @@ echo
 echo ">> Downloading test inputs from ${MINIKUBE_LOCATION} ..."
 gsutil -qm cp \
   "gs://minikube-builds/${MINIKUBE_LOCATION}/minikube-${OS_ARCH}" \
-  "gs://minikube-builds/${MINIKUBE_LOCATION}/docker-machine-driver"-* \
-  "gs://minikube-builds/${MINIKUBE_LOCATION}/e2e-${OS_ARCH}" out
+  "gs://minikube-builds/${MINIKUBE_LOCATION}/e2e-${OS_ARCH}" \
+  out
 
 gsutil -qm cp -r "gs://minikube-builds/${MINIKUBE_LOCATION}/testdata"/* testdata/
 
 gsutil -qm cp "gs://minikube-builds/${MINIKUBE_LOCATION}/gvisor-addon" testdata/
 
-
 # Set the executable bit on the e2e binary and out binary
 export MINIKUBE_BIN="out/minikube-${OS_ARCH}"
 export E2E_BIN="out/e2e-${OS_ARCH}"
-chmod +x "${MINIKUBE_BIN}" "${E2E_BIN}" out/docker-machine-driver-*
+chmod +x "${MINIKUBE_BIN}" "${E2E_BIN}"
 "${MINIKUBE_BIN}" version
 
 procs=$(pgrep "minikube-${OS_ARCH}|e2e-${OS_ARCH}" || true)
@@ -256,28 +290,11 @@ function cleanup_procs() {
         || true
   fi
 
-  # cleaning up stale hyperkits
-  if type -P hyperkit; then
-    for pid in $(pgrep hyperkit); do
-      echo "Killing stale hyperkit $pid"
-      ps -f -p $pid || true
-      kill $pid || true
-      kill -9 $pid || true
-    done
-  fi
-
-  if [[ "${DRIVER}" == "hyperkit" ]]; then
-    if [[ -e out/docker-machine-driver-hyperkit ]]; then
-      sudo chown root:wheel out/docker-machine-driver-hyperkit || true
-      sudo chmod u+s out/docker-machine-driver-hyperkit || true
-    fi
-  fi
-
   kprocs=$(pgrep kubectl || true)
   if [[ "${kprocs}" != "" ]]; then
     echo "error: killing hung kubectl processes ..."
     ps -f -p ${kprocs} || true
-    sudo -E kill ${kprocs} || true
+    kill ${kprocs} || true
   fi
 
 
@@ -287,10 +304,10 @@ function cleanup_procs() {
     echo "Found stale api servers listening on 8443 processes to kill: "
     for p in $none_procs
     do
-      echo "Kiling stale none driver:  $p"
-      sudo -E ps -f -p $p || true
-      sudo -E kill $p || true
-      sudo -E kill -9 $p || true
+      echo "Killing stale none driver: $p"
+      ps -f -p $p || true
+      kill $p || true
+      kill -9 $p || true
     done
   fi
 }
@@ -326,7 +343,7 @@ if [ "$(uname)" != "Darwin" ]; then
   docker build -t gcr.io/k8s-minikube/gvisor-addon:2 -f testdata/gvisor-addon-Dockerfile ./testdata
 fi
 
-readonly LOAD=$(uptime | egrep -o "load average.*: [0-9]+" | cut -d" " -f3)
+readonly LOAD=$(uptime | grep -E -o "load average.*: [0-9]+" | cut -d" " -f3)
 if [[ "${LOAD}" -gt 2 ]]; then
   echo ""
   echo "********************** LOAD WARNING ********************************"
@@ -371,7 +388,7 @@ touch "${JSON_OUT}"
 
 gotestsum --jsonfile "${JSON_OUT}" -f standard-verbose --raw-command -- \
   go tool test2json -t \
-  ${SUDO_PREFIX}${E2E_BIN} \
+  ${E2E_BIN} \
     -minikube-start-args="--driver=${DRIVER} ${EXTRA_START_ARGS}" \
     -test.timeout=${TIMEOUT} -test.v \
     ${EXTRA_TEST_ARGS} \
@@ -399,8 +416,13 @@ sec=$(tail -c 3 <<< $((${elapsed}00/60)))
 elapsed=$min.$sec
 
 if ! type "jq" > /dev/null; then
-echo ">> Installing jq"
-    if [ "${OS}" != "darwin" ]; then
+    echo ">> Installing jq"
+    if [ "${ARCH}" == "arm64" && "${OS}" == "linux" ]; then
+      sudo apt-get install jq -y
+    elif [ "${ARCH}" == "arm64" ]; then
+      echo "Unable to install 'jq' automatically for arm64 on Darwin, please install 'jq' manually."
+      exit 5
+    elif [ "${OS}" != "darwin" ]; then
       curl -LO https://github.com/stedolan/jq/releases/download/jq-1.6/jq-linux64 && sudo install jq-linux64 /usr/local/bin/jq
     else
       curl -LO https://github.com/stedolan/jq/releases/download/jq-1.6/jq-osx-amd64 && sudo install jq-osx-amd64 /usr/local/bin/jq
@@ -408,9 +430,7 @@ echo ">> Installing jq"
 fi
 
 echo ">> Installing gopogh"
-curl -LO "https://github.com/medyagh/gopogh/releases/download/v0.9.0/gopogh-${OS_ARCH}"
-sudo install "gopogh-${OS_ARCH}" /usr/local/bin/gopogh
-
+./installers/check_install_gopogh.sh
 
 echo ">> Running gopogh"
 if test -f "${HTML_OUT}"; then
@@ -419,13 +439,24 @@ fi
 
 touch "${HTML_OUT}"
 touch "${SUMMARY_OUT}"
-gopogh_status=$(gopogh -in "${JSON_OUT}" -out_html "${HTML_OUT}" -out_summary "${SUMMARY_OUT}" -name "${JOB_NAME}" -pr "${MINIKUBE_LOCATION}" -repo github.com/kubernetes/minikube/  -details "${COMMIT}:$(date +%Y-%m-%d):${ROOT_JOB_ID}") || true
+echo "EXTERNAL: *$EXTERNAL*"
+echo "MINIKUBE_LOCATION: *$MINIKUBE_LOCATION*"
+if [ "$EXTERNAL" != "yes" ] && [ "$MINIKUBE_LOCATION" = "master" ]
+then
+	echo "Saving to DB"
+	gopogh -in "${JSON_OUT}" -out_html "${HTML_OUT}" -out_summary "${SUMMARY_OUT}" -name "${JOB_NAME}" -pr "${MINIKUBE_LOCATION}" -repo github.com/kubernetes/minikube/  -details "${COMMIT}:$(date +%Y-%m-%d):${ROOT_JOB_ID}" -db_backend "${GOPOGH_DB_BACKEND}" -db_host "${GOPOGH_DB_HOST}" -db_path "${GOPOGH_DB_PATH}" -use_cloudsql -use_iam_auth
+	echo "Exit code: $?"
+else
+	echo "Not saving to DB"
+	gopogh -in "${JSON_OUT}" -out_html "${HTML_OUT}" -out_summary "${SUMMARY_OUT}" -name "${JOB_NAME}" -pr "${MINIKUBE_LOCATION}" -repo github.com/kubernetes/minikube/  -details "${COMMIT}:$(date +%Y-%m-%d):${ROOT_JOB_ID}"
+fi
+gopogh_status=$(cat "${SUMMARY_OUT}")
 fail_num=$(echo $gopogh_status | jq '.NumberOfFail')
 test_num=$(echo $gopogh_status | jq '.NumberOfTests')
 pessimistic_status="${fail_num} / ${test_num} failures"
-description="completed with ${status} in ${elapsed} minute(s)."
+description="completed with ${status} in ${elapsed} minutes."
 if [ "$status" = "failure" ]; then
-  description="completed with ${pessimistic_status} in ${elapsed} minute(s)."
+  description="completed with ${pessimistic_status} in ${elapsed} minutes."
 fi
 echo "$description"
 
@@ -451,26 +482,27 @@ if [ -z "${EXTERNAL}" ]; then
   echo ">> uploading ${SUMMARY_OUT} to gs://${JOB_GCS_BUCKET}_summary.json"
   echo ">>   public URL:  ${REPORT_URL_BASE}/${JOB_GCS_BUCKET}_summary.json"
   gsutil -qm cp "${SUMMARY_OUT}" "gs://${JOB_GCS_BUCKET}_summary.json" || true
-else 
+else
   # Otherwise, put the results in a predictable spot so the upload job can find them
   REPORTS_PATH=test_reports
   mkdir -p "$REPORTS_PATH"
   cp "${TEST_OUT}" "$REPORTS_PATH/out.txt"
   cp "${JSON_OUT}" "$REPORTS_PATH/out.json"
   cp "${HTML_OUT}" "$REPORTS_PATH/out.html"
-  cp "${SUMMARY_OUT}" "$REPORTS_PATH/summary.txt"
+  cp "${SUMMARY_OUT}" "$REPORTS_PATH/summary.json"
 fi
 
 echo ">> Cleaning up after ourselves ..."
-timeout 3m ${SUDO_PREFIX}${MINIKUBE_BIN} tunnel --cleanup || true
-timeout 5m ${SUDO_PREFIX}${MINIKUBE_BIN} delete --all --purge >/dev/null 2>/dev/null || true
+timeout 3m ${MINIKUBE_BIN} tunnel --cleanup || true
+timeout 5m ${MINIKUBE_BIN} delete --all --purge >/dev/null 2>/dev/null || true
 cleanup_stale_routes || true
 
-${SUDO_PREFIX} rm -Rf "${MINIKUBE_HOME}" || true
-${SUDO_PREFIX} rm -f "${KUBECONFIG}" || true
-${SUDO_PREFIX} rm -f "${TEST_OUT}" || true
-${SUDO_PREFIX} rm -f "${JSON_OUT}" || true
-${SUDO_PREFIX} rm -f "${HTML_OUT}" || true
+rm -Rf "${MINIKUBE_HOME}" || true
+rm -f "${KUBECONFIG}" || true
+rm -f "${TEST_OUT}" || true
+rm -f "${JSON_OUT}" || true
+rm -f "${HTML_OUT}" || true
+rm -f "${SUMMARY_OUT}" || true
 
 rmdir "${TEST_HOME}" || true
 echo ">> ${TEST_HOME} completed at $(date)"

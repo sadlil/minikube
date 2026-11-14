@@ -23,16 +23,17 @@ import (
 	"os"
 	"testing"
 
-	"github.com/docker/machine/libmachine/drivers/plugin/localbinary"
+	"k8s.io/minikube/pkg/libmachine/drivers/plugin/localbinary"
 
 	"k8s.io/minikube/pkg/minikube/driver"
 	_ "k8s.io/minikube/pkg/minikube/registry/drvs/virtualbox"
+	"k8s.io/minikube/pkg/minikube/run"
 	testutil "k8s.io/minikube/pkg/minikube/tests"
 )
 
 const vboxConfig = `
 {
-        "IPAddress": "192.168.99.101",
+        "IPAddress": "192.168.59.101",
         "MachineName": "minikube",
         "SSHUser": "docker",
         "SSHPort": 33627,
@@ -50,7 +51,7 @@ const vboxConfig = `
         "Boot2DockerURL": "file:///home/sundarp/.minikube/cache/iso/minikube-v1.0.6.iso",
         "Boot2DockerImportVM": "",
         "HostDNSResolver": false,
-        "HostOnlyCIDR": "192.168.99.1/24",
+        "HostOnlyCIDR": "192.168.59.1/24",
         "HostOnlyNicType": "82540EM",
         "HostOnlyPromiscMode": "deny",
         "UIType": "headless",
@@ -62,7 +63,7 @@ const vboxConfig = `
 `
 
 func TestLocalClientNewHost(t *testing.T) {
-	c, err := NewAPIClient()
+	c, err := NewAPIClient(&run.CommandOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -87,7 +88,6 @@ func TestLocalClientNewHost(t *testing.T) {
 	}
 
 	for _, test := range tests {
-		test := test
 		t.Run(test.description, func(t *testing.T) {
 			t.Parallel()
 			host, err := c.NewHost(test.driver, test.rawDriver)
@@ -111,9 +111,8 @@ func TestLocalClientNewHost(t *testing.T) {
 }
 
 func TestRunNotDriver(t *testing.T) {
-	tempDir := testutil.MakeTempDir()
-	defer testutil.RemoveTempDir(tempDir)
-	StartDriver()
+	testutil.MakeTempDir(t)
+	StartDriver(&run.CommandOptions{})
 	if !localbinary.CurrentBinaryIsDockerMachine {
 		t.Fatal("CurrentBinaryIsDockerMachine not set. This will break driver initialization.")
 	}
@@ -122,11 +121,10 @@ func TestRunNotDriver(t *testing.T) {
 func TestRunDriver(t *testing.T) {
 	// This test is a bit complicated. It verifies that when the root command is
 	// called with the proper environment variables, we setup the libmachine driver.
-	tempDir := testutil.MakeTempDir()
-	defer testutil.RemoveTempDir(tempDir)
+	testutil.MakeTempDir(t)
 
-	os.Setenv(localbinary.PluginEnvKey, localbinary.PluginEnvVal)
-	os.Setenv(localbinary.PluginEnvDriverName, driver.VirtualBox)
+	t.Setenv(localbinary.PluginEnvKey, localbinary.PluginEnvVal)
+	t.Setenv(localbinary.PluginEnvDriverName, driver.VirtualBox)
 
 	// Capture stdout and reset it later.
 	old := os.Stdout
@@ -137,7 +135,7 @@ func TestRunDriver(t *testing.T) {
 	}()
 
 	// Run the command asynchronously. It should listen on a port for connections.
-	go StartDriver()
+	go StartDriver(&run.CommandOptions{})
 
 	// The command will write out what port it's listening on over stdout.
 	reader := bufio.NewReader(r)

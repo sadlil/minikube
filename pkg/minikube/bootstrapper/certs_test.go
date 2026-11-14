@@ -20,6 +20,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"k8s.io/minikube/pkg/minikube/command"
 	"k8s.io/minikube/pkg/minikube/config"
@@ -28,14 +29,17 @@ import (
 	"k8s.io/minikube/pkg/util"
 )
 
+// TestSetupCerts verifies that the certificate setup logic initializes the required files and directories without error.
 func TestSetupCerts(t *testing.T) {
-	tempDir := tests.MakeTempDir()
-	defer tests.RemoveTempDir(tempDir)
+	tempDir := tests.MakeTempDir(t)
 
-	k8s := config.KubernetesConfig{
-		APIServerName: constants.APIServerName,
-		DNSDomain:     constants.ClusterDNSDomain,
-		ServiceCIDR:   constants.DefaultServiceCIDR,
+	k8s := config.ClusterConfig{
+		CertExpiration: constants.DefaultCertExpiration,
+		KubernetesConfig: config.KubernetesConfig{
+			APIServerName: constants.APIServerName,
+			DNSDomain:     constants.ClusterDNSDomain,
+			ServiceCIDR:   constants.DefaultServiceCIDR,
+		},
 	}
 
 	if err := os.Mkdir(filepath.Join(tempDir, "certs"), 0777); err != nil {
@@ -50,14 +54,20 @@ func TestSetupCerts(t *testing.T) {
 		t.Fatalf("error generating certificate: %v", err)
 	}
 
-	expected := map[string]string{
-		`sudo /bin/bash -c "test -s /usr/share/ca-certificates/mycert.pem && ln -fs /usr/share/ca-certificates/mycert.pem /etc/ssl/certs/mycert.pem"`:             "-",
-		`sudo /bin/bash -c "test -s /usr/share/ca-certificates/minikubeCA.pem && ln -fs /usr/share/ca-certificates/minikubeCA.pem /etc/ssl/certs/minikubeCA.pem"`: "-",
+	expectedToRun := map[string]string{
+		`sudo test -s /usr/share/ca-certificates/mycert.pem`:                                  "-",
+		`sudo ln -fs /usr/share/ca-certificates/mycert.pem /etc/ssl/certs/mycert.pem`:         "-",
+		`sudo test -s /usr/share/ca-certificates/minikubeCA.pem`:                              "-",
+		`sudo ln -fs /usr/share/ca-certificates/minikubeCA.pem /etc/ssl/certs/minikubeCA.pem`: "-",
+		`date -u +%d-%m-%y-%T`: time.Now().Format("02-01-06-15:04:05"),
 	}
 	f := command.NewFakeCommandRunner()
-	f.SetCommandToOutput(expected)
+	f.SetCommandToOutput(expectedToRun)
 
-	if err := SetupCerts(f, k8s, config.Node{}); err != nil {
+	p := command.NewFakeCommandRunner()
+	p.SetCommandToOutput(map[string]string{})
+
+	if err := SetupCerts(k8s, config.Node{}, p, f); err != nil {
 		t.Fatalf("Error starting cluster: %v", err)
 	}
 }

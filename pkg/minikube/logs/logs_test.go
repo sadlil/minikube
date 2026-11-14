@@ -17,7 +17,10 @@ limitations under the License.
 package logs
 
 import (
+	"slices"
 	"testing"
+
+	"k8s.io/minikube/pkg/minikube/config"
 )
 
 func TestIsProblem(t *testing.T) {
@@ -59,5 +62,24 @@ func TestIsProblem(t *testing.T) {
 				t.Fatalf("IsProblem(%s)=%v, want %v", tc.input, got, tc.want)
 			}
 		})
+	}
+}
+
+func TestEnabledAddonPods(t *testing.T) {
+	cfg := config.ClusterConfig{
+		Addons: map[string]bool{
+			"dashboard":           true,
+			"gcp-auth":            true,
+			"ingress":             true,
+			"storage-provisioner": true,
+		},
+	}
+
+	got := enabledAddonPods(cfg)
+	expectedPods := []string{"kubernetes-dashboard", "gcp-auth", "controller_ingress", "storage-provisioner"}
+	for _, expectedPod := range expectedPods {
+		if !slices.Contains(got, expectedPod) {
+			t.Errorf("%q was not found; got = %s", expectedPod, got)
+		}
 	}
 }

@@ -17,7 +17,6 @@ limitations under the License.
 package cmd
 
 import (
-	"io/ioutil"
 	"os"
 	"path/filepath"
 	"strings"
@@ -27,18 +26,13 @@ import (
 )
 
 func TestGenerateTestDocs(t *testing.T) {
-	tempdir, err := ioutil.TempDir("", "")
-	if err != nil {
-		t.Fatalf("creating temp dir failed: %v", err)
-	}
-	defer os.RemoveAll(tempdir)
+	tempdir := t.TempDir()
 	docPath := filepath.Join(tempdir, "tests.md")
 
-	err = generate.TestDocs(docPath, "../../../test/integration")
-	if err != nil {
+	if err := generate.TestDocs(docPath, "../../../test/integration"); err != nil {
 		t.Fatalf("error generating test docs: %v", err)
 	}
-	actualContents, err := ioutil.ReadFile(docPath)
+	actualContents, err := os.ReadFile(docPath)
 	if err != nil {
 		t.Fatalf("error reading generated file: %v", err)
 	}

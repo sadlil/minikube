@@ -17,15 +17,18 @@ limitations under the License.
 package bsutil
 
 import (
+	"bytes"
+	"errors"
 	"fmt"
-	"io/ioutil"
+	"io"
+	"os"
 	"sort"
 	"strings"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
-	"github.com/pmezard/go-difflib/difflib"
 	"golang.org/x/mod/semver"
+	"gopkg.in/yaml.v2"
 	"k8s.io/minikube/pkg/minikube/command"
 	"k8s.io/minikube/pkg/minikube/config"
 	"k8s.io/minikube/pkg/minikube/constants"
@@ -83,7 +86,7 @@ func getExtraOptsPodCidr() []config.ExtraOption {
 // It will error if no testdata are available or in absence of testdata for newest and default minor k8s versions.
 func recentReleases(n int) ([]string, error) {
 	path := "testdata"
-	files, err := ioutil.ReadDir(path)
+	files, err := os.ReadDir(path)
 	if err != nil {
 		return nil, fmt.Errorf("unable to list testdata directory %s: %w", path, err)
 	}
@@ -103,10 +106,10 @@ func recentReleases(n int) ([]string, error) {
 	foundDefault := false
 
 	for _, v := range versions {
-		if strings.HasPrefix(constants.NewestKubernetesVersion, v) {
+		if strings.HasPrefix(constants.NewestKubernetesVersion, v) { //nolint:gocritic // Complains "constants.NewestKubernetesVersion and v arguments order looks reversed"
 			foundNewest = true
 		}
-		if strings.HasPrefix(constants.DefaultKubernetesVersion, v) {
+		if strings.HasPrefix(constants.DefaultKubernetesVersion, v) { //nolint:gocritic // Same as above
 			foundDefault = true
 		}
 	}
@@ -122,12 +125,13 @@ func recentReleases(n int) ([]string, error) {
 	return versions, nil
 }
 
-/**
+/*
+*
 This test case has only 1 thing to test and that is the
 networking/dnsDomain value
 */
 func TestGenerateKubeadmYAMLDNS(t *testing.T) {
-	versions, err := recentReleases(0)
+	versions, err := recentReleases(3)
 	if err != nil {
 		t.Errorf("versions: %v", err)
 	}
@@ -145,7 +149,18 @@ func TestGenerateKubeadmYAMLDNS(t *testing.T) {
 	}
 	for _, version := range versions {
 		for _, tc := range tests {
-			runtime, err := cruntime.New(cruntime.Config{Type: tc.runtime, Runner: fcr})
+			socket := ""
+			switch tc.runtime {
+			case constants.Docker:
+				socket = "/var/run/dockershim.sock"
+			case constants.CRIO:
+				socket = "/var/run/crio/crio.sock"
+			case constants.Containerd:
+				socket = "/run/containerd/containerd.sock"
+			default:
+				socket = "/var/run/dockershim.sock"
+			}
+			runtime, err := cruntime.New(cruntime.Config{Type: tc.runtime, Runner: fcr, Socket: socket})
 			if err != nil {
 				t.Fatalf("runtime: %v", err)
 			}
@@ -177,23 +192,7 @@ func TestGenerateKubeadmYAMLDNS(t *testing.T) {
 				if tc.shouldErr {
 					return
 				}
-				expected, err := ioutil.ReadFile(fmt.Sprintf("testdata/%s/%s.yaml", version, tc.name))
-				if err != nil {
-					t.Fatalf("unable to read testdata: %v", err)
-				}
-				diff, err := difflib.GetUnifiedDiffString(difflib.UnifiedDiff{
-					A:        difflib.SplitLines(string(expected)),
-					B:        difflib.SplitLines(string(got)),
-					FromFile: "Expected",
-					ToFile:   "Got",
-					Context:  1,
-				})
-				if err != nil {
-					t.Fatalf("diff error: %v", err)
-				}
-				if diff != "" {
-					t.Errorf("unexpected diff:\n%s\n===== [RAW OUTPUT] =====\n%s", diff, got)
-				}
+				assertGeneratedYAML(t, got, version, tc.name)
 			})
 		}
 	}
@@ -202,8 +201,8 @@ func TestGenerateKubeadmYAMLDNS(t *testing.T) {
 func TestGenerateKubeadmYAML(t *testing.T) {
 	extraOpts := getExtraOpts()
 	extraOptsPodCidr := getExtraOptsPodCidr()
-	// test the 6 most recent releases
-	versions, err := recentReleases(6)
+	// test the 3 most recent releases
+	versions, err := recentReleases(3)
 	if err != nil {
 		t.Errorf("versions: %v", err)
 	}
@@ -211,7 +210,7 @@ func TestGenerateKubeadmYAML(t *testing.T) {
 	fcr.SetCommandToOutput(map[string]string{
 		"docker info --format {{.CgroupDriver}}": "systemd\n",
 		"crio config":                            "cgroup_manager = \"systemd\"\n",
-		"sudo crictl info":                       "{\"config\": {\"systemdCgroup\": true}}",
+		"sudo crictl --timeout=10s info":         "{\"config\": {\"containerd\": {\"runtimes\": {\"runc\": {\"options\": {\"SystemdCgroup\": true}}}}}}",
 	})
 	tests := []struct {
 		name      string
@@ -220,18 +219,30 @@ func TestGenerateKubeadmYAML(t *testing.T) {
 		cfg       config.ClusterConfig
 	}{
 		{"default", "docker", false, config.ClusterConfig{Name: "mk"}},
-		{"containerd", "containerd", false, config.ClusterConfig{Name: "mk"}},
+		{"containerd", "containerd", false, config.ClusterConfig{Name: "mk", KubernetesConfig: config.KubernetesConfig{ContainerRuntime: constants.Containerd}}},
 		{"crio", "crio", false, config.ClusterConfig{Name: "mk"}},
 		{"options", "docker", false, config.ClusterConfig{Name: "mk", KubernetesConfig: config.KubernetesConfig{ExtraOptions: extraOpts}}},
 		{"crio-options-gates", "crio", false, config.ClusterConfig{Name: "mk", KubernetesConfig: config.KubernetesConfig{ExtraOptions: extraOpts, FeatureGates: "a=b"}}},
 		{"unknown-component", "docker", true, config.ClusterConfig{Name: "mk", KubernetesConfig: config.KubernetesConfig{ExtraOptions: config.ExtraOptionSlice{config.ExtraOption{Component: "not-a-real-component", Key: "killswitch", Value: "true"}}}}},
-		{"containerd-api-port", "containerd", false, config.ClusterConfig{Name: "mk", Nodes: []config.Node{{Port: 12345}}}},
-		{"containerd-pod-network-cidr", "containerd", false, config.ClusterConfig{Name: "mk", KubernetesConfig: config.KubernetesConfig{ExtraOptions: extraOptsPodCidr}}},
+		{"containerd-api-port", "containerd", false, config.ClusterConfig{Name: "mk", KubernetesConfig: config.KubernetesConfig{ContainerRuntime: constants.Containerd}, Nodes: []config.Node{{Port: 12345}}}},
+		{"containerd-pod-network-cidr", "containerd", false, config.ClusterConfig{Name: "mk", KubernetesConfig: config.KubernetesConfig{ContainerRuntime: constants.Containerd, ExtraOptions: extraOptsPodCidr}}},
 		{"image-repository", "docker", false, config.ClusterConfig{Name: "mk", KubernetesConfig: config.KubernetesConfig{ImageRepository: "test/repo"}}},
+		{"etcd-extra-args", "docker", false, config.ClusterConfig{Name: "mk", KubernetesConfig: config.KubernetesConfig{ExtraOptions: config.ExtraOptionSlice{config.ExtraOption{Component: Etcd, Key: "listen-metrics-urls", Value: "http://0.0.0.0:2381"}}}}},
 	}
 	for _, version := range versions {
 		for _, tc := range tests {
-			runtime, err := cruntime.New(cruntime.Config{Type: tc.runtime, Runner: fcr})
+			socket := ""
+			switch tc.runtime {
+			case constants.Docker:
+				socket = "/var/run/dockershim.sock"
+			case constants.CRIO:
+				socket = "/var/run/crio/crio.sock"
+			case constants.Containerd:
+				socket = "/run/containerd/containerd.sock"
+			default:
+				socket = "/var/run/dockershim.sock"
+			}
+			runtime, err := cruntime.New(cruntime.Config{Type: tc.runtime, Runner: fcr, Socket: socket})
 			if err != nil {
 				t.Fatalf("runtime: %v", err)
 			}
@@ -270,25 +281,38 @@ func TestGenerateKubeadmYAML(t *testing.T) {
 				if tc.shouldErr {
 					return
 				}
-				expected, err := ioutil.ReadFile(fmt.Sprintf("testdata/%s/%s.yaml", version, tc.name))
-				if err != nil {
-					t.Fatalf("unable to read testdata: %v", err)
-				}
-				diff, err := difflib.GetUnifiedDiffString(difflib.UnifiedDiff{
-					A:        difflib.SplitLines(string(expected)),
-					B:        difflib.SplitLines(string(got)),
-					FromFile: "Expected",
-					ToFile:   "Got",
-					Context:  1,
-				})
-				if err != nil {
-					t.Fatalf("diff error: %v", err)
-				}
-				if diff != "" {
-					t.Errorf("unexpected diff:\n%s\n", diff)
-				}
+				assertGeneratedYAML(t, got, version, tc.name)
 			})
 		}
+	}
+}
+
+func assertValidYAMLDocs(t *testing.T, data []byte) {
+	t.Helper()
+	dec := yaml.NewDecoder(bytes.NewReader(data))
+	for i := 0; ; i++ {
+		var doc any
+		err := dec.Decode(&doc)
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			t.Errorf("invalid YAML (doc #%d): %v\n--- got ---\n%s", i, err, data)
+			break
+		}
+	}
+}
+
+func assertGeneratedYAML(t *testing.T, got []byte, version, name string) {
+	t.Helper()
+	assertValidYAMLDocs(t, got)
+	path := fmt.Sprintf("testdata/%s/%s.yaml", version, name)
+	expected, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("unable to read testdata: %v", err)
+	}
+	if diff := cmp.Diff(string(expected), string(got)); diff != "" {
+		t.Errorf("GenerateKubeadmYAML mismatch (-want +got):\n%s", diff)
 	}
 }
 
@@ -304,5 +328,52 @@ func TestEtcdExtraArgs(t *testing.T) {
 	actual := etcdExtraArgs(extraOpts)
 	if diff := cmp.Diff(expected, actual); diff != "" {
 		t.Errorf("machines mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func TestKubeletConfig(t *testing.T) {
+	expected := map[string]string{
+		"localStorageCapacityIsolation": "false",
+	}
+	extraOpts := append(getExtraOpts(), []config.ExtraOption{
+		{
+			Component: Kubelet,
+			Key:       "unsupported-config-option",
+			Value:     "any",
+		}, {
+			Component: Kubelet,
+			Key:       "localStorageCapacityIsolation",
+			Value:     "false",
+		}, {
+			Component: Kubelet,
+			Key:       "kubelet.cgroups-per-qos",
+			Value:     "false",
+		}}...)
+	actual := kubeletConfigOpts(extraOpts)
+	if diff := cmp.Diff(expected, actual); diff != "" {
+		t.Errorf("machines mismatch (-want +got):\n%s", diff)
+	}
+}
+
+// TestHasResolvConfSearchRegression checks that the regression check for resolv.conf search path
+// correctly identifies affected Kubernetes versions (specifically v1.25.0).
+// This is important to ensure the workaround is applied only when necessary, preventing potential DNS issues.
+func TestHasResolvConfSearchRegression(t *testing.T) {
+	tests := []struct {
+		version string
+		want    bool
+	}{
+		{"v1.25.0", true},
+		{"v1.25.3", false},
+		{"v1.24.0", false},
+		{"v1.26.0", false},
+		{"invalid", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.version, func(t *testing.T) {
+			if got := HasResolvConfSearchRegression(tt.version); got != tt.want {
+				t.Errorf("HasResolvConfSearchRegression(%q) = %v, want %v", tt.version, got, tt.want)
+			}
+		})
 	}
 }

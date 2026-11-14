@@ -1,0 +1,53 @@
+name: 日本語
+description: 問題を報告する
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: 何が起こりましたか？
+      description: |
+        ヒント: 追加のログを取得するには、コマンドラインに "--alsologtostderr" フラグを付けて実行してください。
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: ログファイルを添付
+      description: |
+        ヒント: `minikube logs --file=log.txt` を実行し、ブラウザに `log.txt` ファイルをドラッグ＆ドロップしてください。
+    validations:
+      required: true
+  - type: dropdown
+    id: operating-system
+    attributes:
+      label: オペレーティングシステム
+      description: ご使用のOSは何ですか？
+      options:
+        - macOS (Default)
+        - Windows
+        - Ubuntu
+        - Redhat/Fedora
+        - Other
+    validations:
+      required: false
+  - type: dropdown
+    id: driver
+    attributes:
+      label: ドライバー
+      description: どのドライバーを使用していますか？
+      options:
+        - N/A
+        - Docker
+        - Podman
+        - Hyper-V
+        - KVM2
+        - VirtualBox
+        - None (Baremetal)
+        - SSH
+        - VMware
+        - Parallels
+        - QEMU
+        - vfkit
+        - krunkit
+    validations:
+      required: false

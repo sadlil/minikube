@@ -25,8 +25,8 @@ import (
 	"reflect"
 	"strings"
 
-	"github.com/docker/machine/libmachine/host"
-	"github.com/docker/machine/libmachine/state"
+	"k8s.io/minikube/pkg/libmachine/host"
+	"k8s.io/minikube/pkg/libmachine/state"
 	"k8s.io/minikube/pkg/minikube/config"
 	"k8s.io/minikube/pkg/minikube/tests"
 )
@@ -84,7 +84,7 @@ func TestMinikubeCheckReturnsHostInformation(t *testing.T) {
 
 	ip := net.ParseIP("1.2.3.4")
 	_, ipNet, _ := net.ParseCIDR("96.0.0.0/12")
-	dnsIP, err := util.GetDNSIP(ipNet.String())
+	dnsIP, err := util.DNSIP(ipNet.String())
 	if err != nil {
 		t.Errorf("getdnsIP: %v", err)
 	}

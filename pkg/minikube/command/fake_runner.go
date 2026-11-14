@@ -18,6 +18,7 @@ package command
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"os/exec"
@@ -25,8 +26,6 @@ import (
 	"time"
 
 	"golang.org/x/sync/syncmap"
-
-	"github.com/pkg/errors"
 
 	"k8s.io/klog/v2"
 	"k8s.io/minikube/pkg/minikube/assets"
@@ -64,7 +63,7 @@ func (f *FakeCommandRunner) RunCmd(cmd *exec.Cmd) (*RunResult, error) {
 
 		var txt strings.Builder
 		for _, c := range f.commands() {
-			txt.WriteString(fmt.Sprintf("  `%s`\n", c))
+			fmt.Fprintf(&txt, "  `%s`\n", c)
 		}
 		return rr, fmt.Errorf("unregistered command:\n  `%s`\nexpected one of:\n%s", key, txt.String())
 	}
@@ -72,11 +71,15 @@ func (f *FakeCommandRunner) RunCmd(cmd *exec.Cmd) (*RunResult, error) {
 	var buf bytes.Buffer
 	outStr := ""
 	if out != nil {
-		outStr = out.(string)
+		var ok bool
+		outStr, ok = out.(string)
+		if !ok {
+			return rr, fmt.Errorf("unregistered or invalid command output type for %q: expected string but got %T", key, out)
+		}
 	}
 	_, err := buf.WriteString(outStr)
 	if err != nil {
-		return rr, errors.Wrap(err, "Writing outStr to FakeCommandRunner's buffer")
+		return rr, fmt.Errorf("Writing outStr to FakeCommandRunner's buffer: %w", err)
 	}
 	rr.Stdout = buf
 	rr.Stderr = buf
@@ -106,7 +109,7 @@ func (f *FakeCommandRunner) StartCmd(cmd *exec.Cmd) (*StartedCmd, error) {
 
 		var txt strings.Builder
 		for _, c := range f.commands() {
-			txt.WriteString(fmt.Sprintf("  `%s`\n", c))
+			fmt.Fprintf(&txt, "  `%s`\n", c)
 		}
 		return sc, fmt.Errorf("unregistered command:\n  `%s`\nexpected one of:\n%s", key, txt.String())
 	}
@@ -114,11 +117,15 @@ func (f *FakeCommandRunner) StartCmd(cmd *exec.Cmd) (*StartedCmd, error) {
 	var buf bytes.Buffer
 	outStr := ""
 	if out != nil {
-		outStr = out.(string)
+		var ok bool
+		outStr, ok = out.(string)
+		if !ok {
+			return sc, fmt.Errorf("unregistered or invalid command output type for %q: expected string but got %T", key, out)
+		}
 	}
 	_, err := buf.WriteString(outStr)
 	if err != nil {
-		return sc, errors.Wrap(err, "Writing outStr to FakeCommandRunner's buffer")
+		return sc, fmt.Errorf("Writing outStr to FakeCommandRunner's buffer: %w", err)
 	}
 	rr.Stdout = buf
 	rr.Stderr = buf
@@ -136,9 +143,31 @@ func (f *FakeCommandRunner) Copy(file assets.CopyableFile) error {
 	var b bytes.Buffer
 	_, err := io.Copy(&b, file)
 	if err != nil {
-		return errors.Wrapf(err, "error reading file: %+v", file)
+		return fmt.Errorf("error reading file: %+v: %w", file, err)
 	}
 	f.fileMap.Store(file.GetSourcePath(), b.String())
+	return nil
+}
+
+// CopyFrom copy content from file to the stored map.
+func (f *FakeCommandRunner) CopyFrom(file assets.CopyableFile) error {
+	v, ok := f.fileMap.Load(file.GetSourcePath())
+	if !ok {
+		return errors.New("not found in map")
+	}
+	var b bytes.Buffer
+	switch val := v.(type) {
+	case string:
+		b.WriteString(val)
+	case bytes.Buffer:
+		b = val
+	default:
+		return fmt.Errorf("file contents for %s is of unexpected type %T", file.GetSourcePath(), v)
+	}
+	_, err := io.Copy(file, &b)
+	if err != nil {
+		return fmt.Errorf("error writing file: %+v: %w", file, err)
+	}
 	return nil
 }
 
@@ -146,6 +175,11 @@ func (f *FakeCommandRunner) Copy(file assets.CopyableFile) error {
 func (f *FakeCommandRunner) Remove(file assets.CopyableFile) error {
 	f.fileMap.Delete(file.GetSourcePath())
 	return nil
+}
+
+// ReadableFile implements interface (without implementation)
+func (f *FakeCommandRunner) ReadableFile(_ string) (assets.ReadableFile, error) {
+	return nil, nil
 }
 
 // SetFileToContents stores the file to contents map for the FakeCommandRunner
@@ -169,12 +203,15 @@ func (f *FakeCommandRunner) GetFileToContents(filename string) (string, error) {
 	if !ok {
 		return "", fmt.Errorf("unavailable file: %s", filename)
 	}
-	return contents.(string), nil
+	if str, ok := contents.(string); ok {
+		return str, nil
+	}
+	return "", fmt.Errorf("file contents for %s is of unexpected type %T", filename, contents)
 }
 
 func (f *FakeCommandRunner) commands() []string {
 	cmds := []string{}
-	f.cmdMap.Range(func(k, v interface{}) bool {
+	f.cmdMap.Range(func(k, _ interface{}) bool {
 		cmds = append(cmds, fmt.Sprintf("%s", k))
 		return true
 	})
@@ -189,7 +226,7 @@ func (f *FakeCommandRunner) DumpMaps(w io.Writer) {
 		return true
 	})
 	fmt.Fprintln(w, "Filenames: ")
-	f.fileMap.Range(func(k, v interface{}) bool {
+	f.fileMap.Range(func(k, _ interface{}) bool {
 		fmt.Fprint(w, k)
 		return true
 	})

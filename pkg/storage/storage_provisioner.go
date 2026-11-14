@@ -22,7 +22,7 @@ import (
 	"os"
 	"path"
 
-	"github.com/pkg/errors"
+	"errors"
 
 	core "k8s.io/api/core/v1"
 	meta "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -56,15 +56,15 @@ func NewHostPathProvisioner(pvDir string) controller.Provisioner {
 var _ controller.Provisioner = &hostPathProvisioner{}
 
 // Provision creates a storage asset and returns a PV object representing it.
-func (p *hostPathProvisioner) Provision(ctx context.Context, options controller.ProvisionOptions) (*core.PersistentVolume, controller.ProvisioningState, error) {
-	path := path.Join(p.pvDir, options.PVC.Namespace, options.PVC.Name)
-	klog.Infof("Provisioning volume %v to %s", options, path)
-	if err := os.MkdirAll(path, 0777); err != nil {
+func (p *hostPathProvisioner) Provision(_ context.Context, options controller.ProvisionOptions) (*core.PersistentVolume, controller.ProvisioningState, error) {
+	hostPath := path.Join(p.pvDir, options.PVC.Namespace, options.PVC.Name)
+	klog.Infof("Provisioning volume %v to %s", options, hostPath)
+	if err := os.MkdirAll(hostPath, 0777); err != nil {
 		return nil, controller.ProvisioningFinished, err
 	}
 
 	// Explicitly chmod created dir, so we know mode is set to 0777 regardless of umask
-	if err := os.Chmod(path, 0777); err != nil {
+	if err := os.Chmod(hostPath, 0777); err != nil {
 		return nil, controller.ProvisioningFinished, err
 	}
 
@@ -83,7 +83,7 @@ func (p *hostPathProvisioner) Provision(ctx context.Context, options controller.
 			},
 			PersistentVolumeSource: core.PersistentVolumeSource{
 				HostPath: &core.HostPathVolumeSource{
-					Path: path,
+					Path: hostPath,
 				},
 			},
 		},
@@ -94,7 +94,7 @@ func (p *hostPathProvisioner) Provision(ctx context.Context, options controller.
 
 // Delete removes the storage asset that was created by Provision represented
 // by the given PV.
-func (p *hostPathProvisioner) Delete(ctx context.Context, volume *core.PersistentVolume) error {
+func (p *hostPathProvisioner) Delete(_ context.Context, volume *core.PersistentVolume) error {
 	klog.Infof("Deleting volume %v", volume)
 	ann, ok := volume.Annotations["hostPathProvisionerIdentity"]
 	if !ok {
@@ -104,8 +104,8 @@ func (p *hostPathProvisioner) Delete(ctx context.Context, volume *core.Persisten
 		return &controller.IgnoredError{Reason: "identity annotation on PV does not match ours"}
 	}
 
-	if err := os.RemoveAll(volume.Spec.PersistentVolumeSource.HostPath.Path); err != nil {
-		return errors.Wrap(err, "removing hostpath PV")
+	if err := os.RemoveAll(volume.Spec.HostPath.Path); err != nil {
+		return fmt.Errorf("removing hostpath PV: %w", err)
 	}
 
 	return nil

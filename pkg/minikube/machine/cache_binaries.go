@@ -17,15 +17,12 @@ limitations under the License.
 package machine
 
 import (
-	"path"
+	"fmt"
+	"runtime"
+	"slices"
 
-	"github.com/pkg/errors"
 	"golang.org/x/sync/errgroup"
-	"k8s.io/klog/v2"
-	"k8s.io/minikube/pkg/minikube/assets"
 	"k8s.io/minikube/pkg/minikube/bootstrapper"
-	"k8s.io/minikube/pkg/minikube/command"
-	"k8s.io/minikube/pkg/minikube/detect"
 	"k8s.io/minikube/pkg/minikube/download"
 )
 
@@ -34,48 +31,25 @@ func isExcluded(binary string, excludedBinaries []string) bool {
 	if excludedBinaries == nil {
 		return false
 	}
-	for _, excludedBinary := range excludedBinaries {
-		if binary == excludedBinary {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(excludedBinaries, binary)
 }
 
 // CacheBinariesForBootstrapper will cache binaries for a bootstrapper
-func CacheBinariesForBootstrapper(version string, clusterBootstrapper string, excludeBinaries []string) error {
-	binaries := bootstrapper.GetCachedBinaryList(clusterBootstrapper)
+func CacheBinariesForBootstrapper(version string, excludeBinaries []string, binariesURL string) error {
+	binaries := bootstrapper.GetCachedBinaryList()
 
 	var g errgroup.Group
 	for _, bin := range binaries {
 		if isExcluded(bin, excludeBinaries) {
 			continue
 		}
-		bin := bin // https://golang.org/doc/faq#closures_and_goroutines
+		bin := bin // https://go.dev/doc/faq#closures_and_goroutines
 		g.Go(func() error {
-			if _, err := download.Binary(bin, version, "linux", detect.EffectiveArch()); err != nil {
-				return errors.Wrapf(err, "caching binary %s", bin)
+			if _, err := download.Binary(bin, version, "linux", runtime.GOARCH, binariesURL); err != nil {
+				return fmt.Errorf("caching binary %s: %w", bin, err)
 			}
 			return nil
 		})
 	}
 	return g.Wait()
-}
-
-// CopyBinary copies a locally cached binary to the guest VM
-func CopyBinary(cr command.Runner, src string, dest string) error {
-	f, err := assets.NewFileAsset(src, path.Dir(dest), path.Base(dest), "0755")
-	if err != nil {
-		return errors.Wrap(err, "new file asset")
-	}
-	defer func() {
-		if err := f.Close(); err != nil {
-			klog.Warningf("error closing the file %s: %v", f.GetSourcePath(), err)
-		}
-	}()
-
-	if err := cr.Copy(f); err != nil {
-		return errors.Wrapf(err, "copy")
-	}
-	return nil
 }

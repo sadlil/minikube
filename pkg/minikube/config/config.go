@@ -20,12 +20,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"os"
 
-	"github.com/pkg/errors"
+	"errors"
+
 	"github.com/spf13/viper"
 
+	"k8s.io/klog/v2"
 	"k8s.io/minikube/pkg/minikube/localpath"
 )
 
@@ -44,6 +45,10 @@ const (
 	ProfileName = "profile"
 	// UserFlag is the key for the global user flag (ex. --user=user1)
 	UserFlag = "user"
+	// SkipAuditFlag is the key for skipping command from aduit
+	SkipAuditFlag = "skip-audit"
+	// Rootless is the key for the global rootless parameter (boolean)
+	Rootless = "rootless"
 	// AddonImages stores custom addon images config
 	AddonImages = "addon-images"
 	// AddonRegistries stores custom addon images config
@@ -52,6 +57,12 @@ const (
 	AddonListFlag = "addons"
 	// EmbedCerts represents the config for embedding certificates in kubeconfig
 	EmbedCerts = "EmbedCerts"
+	// MaxAuditEntries is the maximum number of audit entries to retain
+	MaxAuditEntries = "MaxAuditEntries"
+	// DNSServers is the key for static DNS server addresses for VM drivers
+	DNSServers = "dns-servers"
+	// MDNS is the key for the mDNS parameter (boolean)
+	MDNS = "mdns"
 )
 
 var (
@@ -171,7 +182,15 @@ func encode(w io.Writer, m MinikubeConfig) error {
 
 // Load loads the Kubernetes and machine config for the current machine
 func Load(profile string, miniHome ...string) (*ClusterConfig, error) {
-	return DefaultLoader.LoadConfigFromFile(profile, miniHome...)
+	cc, err := DefaultLoader.LoadConfigFromFile(profile, miniHome...)
+	if err == nil {
+		klog.Infof("Loaded profile config \"%s\": Driver=%s, ContainerRuntime=%s, KubernetesVersion=%s",
+			profile,
+			cc.Driver,
+			cc.KubernetesConfig.ContainerRuntime,
+			cc.KubernetesConfig.KubernetesVersion)
+	}
+	return cc, err
 }
 
 // Write writes the Kubernetes and machine config for the current machine
@@ -199,19 +218,19 @@ func (c *simpleConfigLoader) LoadConfigFromFile(profileName string, miniHome ...
 		if os.IsNotExist(err) {
 			return nil, &ErrNotExist{fmt.Sprintf("cluster %q does not exist", profileName)}
 		}
-		return nil, errors.Wrap(err, "stat")
+		return nil, fmt.Errorf("stat: %w", err)
 	}
 
-	data, err := ioutil.ReadFile(path)
+	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsPermission(err) {
 			return nil, &ErrPermissionDenied{err.Error()}
 		}
-		return nil, errors.Wrap(err, "read")
+		return nil, fmt.Errorf("read: %w", err)
 	}
 
 	if err := json.Unmarshal(data, &cc); err != nil {
-		return nil, errors.Wrap(err, "unmarshal")
+		return nil, fmt.Errorf("unmarshal: %w", err)
 	}
 	return &cc, nil
 }
@@ -222,7 +241,7 @@ func (c *simpleConfigLoader) WriteConfigToFile(profileName string, cc *ClusterCo
 	if err != nil {
 		return err
 	}
-	return ioutil.WriteFile(path, contents, 0644)
+	return os.WriteFile(path, contents, 0644)
 }
 
 // MultiNode returns true if the cluster has multiple nodes or if the request is asking for multinode
@@ -230,10 +249,13 @@ func MultiNode(cc ClusterConfig) bool {
 	if len(cc.Nodes) > 1 {
 		return true
 	}
+	return viper.GetInt("nodes") > 1
+}
 
-	if viper.GetInt("nodes") > 1 {
+// IsHA returns true if ha (multi-control plane) cluster is requested.
+func IsHA(cc ClusterConfig) bool {
+	if len(ControlPlanes(cc)) > 1 {
 		return true
 	}
-
-	return false
+	return viper.GetBool("ha")
 }

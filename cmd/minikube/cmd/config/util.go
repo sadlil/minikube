@@ -25,8 +25,8 @@ import (
 	"k8s.io/minikube/pkg/minikube/out"
 )
 
-// Runs all the validation or callback functions and collects errors
-func run(name string, value string, fns []setFn) error {
+// Invoke all the validation or callback functions and collects errors
+func invoke(name string, value string, fns []setFn) error {
 	var errors []error
 	for _, fn := range fns {
 		err := fn(name, value)
@@ -91,6 +91,12 @@ func SetBool(m config.MinikubeConfig, name string, val string) error {
 		return err
 	}
 	m[name] = b
+	return nil
+}
+
+// SetStringSlice sets a []string value from a comma-separated string
+func SetStringSlice(m config.MinikubeConfig, name string, val string) error {
+	m[name] = strings.Split(val, ",")
 	return nil
 }
 

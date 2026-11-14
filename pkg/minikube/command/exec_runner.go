@@ -18,9 +18,9 @@ package command
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"os"
 	"os/exec"
 	"path"
@@ -29,7 +29,6 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/pkg/errors"
 	"k8s.io/klog/v2"
 	"k8s.io/minikube/pkg/minikube/assets"
 )
@@ -41,7 +40,7 @@ type execRunner struct {
 	sudo bool
 }
 
-// NewExecRunner returns a kicRunner implementor of runner which runs cmds inside a container
+// NewExecRunner returns a kicRunner implementer of runner which runs cmds inside a container
 func NewExecRunner(sudo bool) Runner {
 	return &execRunner{sudo: sudo}
 }
@@ -77,9 +76,7 @@ func (e *execRunner) RunCmd(cmd *exec.Cmd) (*RunResult, error) {
 	err := cmd.Run()
 	elapsed := time.Since(start)
 
-	if exitError, ok := err.(*exec.ExitError); ok {
-		rr.ExitCode = exitError.ExitCode()
-	}
+	rr.ExitCode = e.exitCode(err)
 	// Decrease log spam
 	if elapsed > (1 * time.Second) {
 		klog.Infof("Completed: %s: (%s)", rr.Command(), elapsed)
@@ -116,20 +113,18 @@ func (*execRunner) StartCmd(cmd *exec.Cmd) (*StartedCmd, error) {
 	cmd.Stderr = errb
 
 	if err := cmd.Start(); err != nil {
-		return sc, errors.Wrap(err, "start")
+		return sc, fmt.Errorf("start: %w", err)
 	}
 
 	return sc, nil
 }
 
 // WaitCmd implements the Command Runner interface to wait until a started exec.Cmd object finishes
-func (*execRunner) WaitCmd(sc *StartedCmd) (*RunResult, error) {
+func (e *execRunner) WaitCmd(sc *StartedCmd) (*RunResult, error) {
 	rr := sc.rr
 
 	err := sc.cmd.Wait()
-	if exitError, ok := err.(*exec.ExitError); ok {
-		rr.ExitCode = exitError.ExitCode()
-	}
+	rr.ExitCode = e.exitCode(err)
 
 	if err == nil {
 		return rr, nil
@@ -144,7 +139,7 @@ func (e *execRunner) Copy(f assets.CopyableFile) error {
 	if _, err := os.Stat(dst); err == nil {
 		klog.Infof("found %s, removing ...", dst)
 		if err := e.Remove(f); err != nil {
-			return errors.Wrapf(err, "error removing file %s", dst)
+			return fmt.Errorf("error removing file %s: %w", dst, err)
 		}
 	}
 
@@ -156,31 +151,45 @@ func (e *execRunner) Copy(f assets.CopyableFile) error {
 
 	perms, err := strconv.ParseInt(f.GetPermissions(), 8, 0)
 	if err != nil || perms > 07777 {
-		return errors.Wrapf(err, "error converting permissions %s to integer", f.GetPermissions())
+		return fmt.Errorf("error converting permissions %s to integer: %w", f.GetPermissions(), err)
 	}
 
 	if e.sudo {
 		// write to temp location ...
-		tmpfile, err := ioutil.TempFile("", "minikube")
+		tmpfile, err := os.CreateTemp("", "minikube")
 		if err != nil {
-			return errors.Wrapf(err, "error creating tempfile")
+			return fmt.Errorf("error creating tempfile: %w", err)
 		}
 		defer os.Remove(tmpfile.Name())
-		err = writeFile(tmpfile.Name(), f, os.FileMode(perms))
-		if err != nil {
-			return errors.Wrapf(err, "error writing to tempfile %s", tmpfile.Name())
+
+		if err := writeFile(tmpfile.Name(), f, os.FileMode(perms)); err != nil {
+			return fmt.Errorf("error writing to tempfile %s: %w", tmpfile.Name(), err)
 		}
 
-		// ... then use sudo to move to target ...
-		_, err = e.RunCmd(exec.Command("sudo", "cp", "-a", tmpfile.Name(), dst))
-		if err != nil {
-			return errors.Wrapf(err, "error copying tempfile %s to dst %s", tmpfile.Name(), dst)
+		// ... then use sudo to move to target
+		if _, err := e.RunCmd(exec.Command("sudo", "cp", "-a", tmpfile.Name(), dst)); err != nil {
+			return fmt.Errorf("error copying tempfile %s to dst %s: %w", tmpfile.Name(), dst, err)
 		}
-
-		// ... then fix file permission that should have been fine because of "cp -a"
-		err = os.Chmod(dst, os.FileMode(perms))
-		return err
+		return nil
 	}
+	return writeFile(dst, f, os.FileMode(perms))
+}
+
+// CopyFrom copies a file
+func (e *execRunner) CopyFrom(f assets.CopyableFile) error {
+	src := path.Join(f.GetTargetDir(), f.GetTargetName())
+
+	dst := f.GetSourcePath()
+	klog.Infof("cp: %s --> %s (%d bytes)", src, dst, f.GetLength())
+	if f.GetLength() == 0 {
+		klog.Warningf("0 byte asset: %+v", f)
+	}
+
+	perms, err := strconv.ParseInt(f.GetPermissions(), 8, 0)
+	if err != nil || perms > 07777 {
+		return fmt.Errorf("error converting permissions %s to integer: %w", f.GetPermissions(), err)
+	}
+
 	return writeFile(dst, f, os.FileMode(perms))
 }
 
@@ -201,4 +210,26 @@ func (e *execRunner) Remove(f assets.CopyableFile) error {
 		return nil
 	}
 	return os.Remove(dst)
+}
+
+func (e *execRunner) ReadableFile(_ string) (assets.ReadableFile, error) {
+	return nil, errors.New("execRunner does not support ReadableFile - you could be the first to add it")
+}
+
+// exitCode extracts the exit code from an exec error, handling the following
+// cases:
+// - *exec.ExitError: the process ran and exited with a non-zero code.
+// - os.ErrNotExist: absolute path does not exist (kernel ENOENT).
+// - exec.ErrNotFound: PATH lookup found no matching executable.
+// The last two both mean "binary not found" but Go returns different
+// errors depending on whether the path is absolute or relative.
+// Returns 0 for other errors (e.g. permission denied).
+func (*execRunner) exitCode(err error) int {
+	if exitError, ok := err.(*exec.ExitError); ok {
+		return exitError.ExitCode()
+	}
+	if errors.Is(err, os.ErrNotExist) || errors.Is(err, exec.ErrNotFound) {
+		return NotFound
+	}
+	return 0
 }

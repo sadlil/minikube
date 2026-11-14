@@ -19,10 +19,11 @@ package bsutil
 
 import (
 	"bytes"
+	"fmt"
 	"os"
 	"path"
 
-	"github.com/pkg/errors"
+	"github.com/blang/semver/v4"
 	"k8s.io/minikube/pkg/drivers/kic/oci"
 	"k8s.io/minikube/pkg/minikube/bootstrapper/bsutil/ktmpl"
 	"k8s.io/minikube/pkg/minikube/bootstrapper/images"
@@ -34,16 +35,27 @@ import (
 	"k8s.io/minikube/pkg/util"
 )
 
+// kubeletConfigParams are the only allowed kubelet parameters for kubeadmin config file and not to be used as kubelet flags
+// ref: https://kubernetes.io/docs/reference/command-line-tools-reference/kubelet/ - look for "DEPRECATED" flags
+// ref: https://kubernetes.io/docs/tasks/administer-cluster/kubelet-config-file/
+// ref: https://kubernetes.io/docs/reference/config-api/kubelet-config.v1beta1/#kubelet-config-k8s-io-v1beta1-KubeletConfiguration
+var kubeletConfigParams = []string{
+	"localStorageCapacityIsolation",
+	"runtime-request-timeout",
+	"hairpin-mode",
+	"FailCgroupV1",
+}
+
 func extraKubeletOpts(mc config.ClusterConfig, nc config.Node, r cruntime.Manager) (map[string]string, error) {
 	k8s := mc.KubernetesConfig
 	version, err := util.ParseKubernetesVersion(k8s.KubernetesVersion)
 	if err != nil {
-		return nil, errors.Wrap(err, "parsing Kubernetes version")
+		return nil, fmt.Errorf("parsing Kubernetes version: %w", err)
 	}
 
 	extraOpts, err := extraConfigForComponent(Kubelet, k8s.ExtraOptions, version)
 	if err != nil {
-		return nil, errors.Wrap(err, "generating extra configuration for kubelet")
+		return nil, fmt.Errorf("generating extra configuration for kubelet: %w", err)
 	}
 
 	for k, v := range r.KubeletOptions() {
@@ -58,7 +70,12 @@ func extraKubeletOpts(mc config.ClusterConfig, nc config.Node, r cruntime.Manage
 	}
 
 	if k8s.NetworkPlugin != "" {
-		extraOpts["network-plugin"] = k8s.NetworkPlugin
+		// Only CNI is supported in 1.24+, and it is the default
+		if version.LT(semver.MustParse("1.24.0-alpha.2")) {
+			extraOpts["network-plugin"] = k8s.NetworkPlugin
+		} else if k8s.NetworkPlugin != "cni" && mc.KubernetesConfig.ContainerRuntime != constants.Docker {
+			return nil, fmt.Errorf("invalid network plugin: %s", k8s.NetworkPlugin)
+		}
 
 		if k8s.NetworkPlugin == "kubenet" {
 			extraOpts["pod-cidr"] = cni.DefaultPodCIDR
@@ -68,24 +85,45 @@ func extraKubeletOpts(mc config.ClusterConfig, nc config.Node, r cruntime.Manage
 	if _, ok := extraOpts["node-ip"]; !ok {
 		extraOpts["node-ip"] = nc.IP
 	}
+
 	if _, ok := extraOpts["hostname-override"]; !ok {
 		nodeName := KubeNodeName(mc, nc)
 		extraOpts["hostname-override"] = nodeName
 	}
 
-	pauseImage := images.Pause(version, k8s.ImageRepository)
-	if _, ok := extraOpts["pod-infra-container-image"]; !ok && k8s.ImageRepository != "" && pauseImage != "" && k8s.ContainerRuntime != remoteContainerRuntime {
-		extraOpts["pod-infra-container-image"] = pauseImage
+	// allows clients to identify minikube nodes via .spec.providerID, similar to kind
+	if _, ok := extraOpts["provider-id"]; !ok {
+		extraOpts["provider-id"] = fmt.Sprintf("minikube://%s/%s/%s/%s", mc.Driver, k8s.ContainerRuntime, mc.Name, extraOpts["hostname-override"])
+	}
+
+	// Handled by CRI in 1.24+, and not by kubelet
+	if version.LT(semver.MustParse("1.24.0-alpha.2")) {
+		pauseImage := images.Pause(version, k8s.ImageRepository)
+		if _, ok := extraOpts["pod-infra-container-image"]; !ok && k8s.ImageRepository != "" && pauseImage != "" && k8s.ContainerRuntime != remoteContainerRuntime {
+			extraOpts["pod-infra-container-image"] = pauseImage
+		}
+	}
+
+	// container-runtime-endpoint kubelet flag was deprecated but corresponding containerRuntimeEndpoint kubelet config field is "required" and supported from k8s v1.27
+	// ref: https://kubernetes.io/docs/reference/command-line-tools-reference/kubelet/#options
+	// ref: https://github.com/kubernetes/kubernetes/issues/118787
+	if version.GTE(semver.MustParse("1.27.0")) {
+		kubeletConfigParams = append(kubeletConfigParams, "container-runtime-endpoint")
 	}
 
 	// parses a map of the feature gates for kubelet
 	_, kubeletFeatureArgs, err := parseFeatureArgs(k8s.FeatureGates)
 	if err != nil {
-		return nil, errors.Wrap(err, "parses feature gate config for kubelet")
+		return nil, fmt.Errorf("parses feature gate config for kubelet: %w", err)
 	}
 
 	if kubeletFeatureArgs != "" {
 		extraOpts["feature-gates"] = kubeletFeatureArgs
+	}
+
+	// filter out non-flag extra kubelet config options
+	for _, opt := range kubeletConfigParams {
+		delete(extraOpts, opt)
 	}
 
 	return extraOpts, nil
@@ -121,7 +159,7 @@ func NewKubeletService(cfg config.KubernetesConfig) ([]byte, error) {
 	var b bytes.Buffer
 	opts := struct{ KubeletPath string }{KubeletPath: path.Join(binRoot(cfg.KubernetesVersion), "kubelet")}
 	if err := ktmpl.KubeletServiceTemplate.Execute(&b, opts); err != nil {
-		return nil, errors.Wrap(err, "template execute")
+		return nil, fmt.Errorf("template execute: %w", err)
 	}
 	return b.Bytes(), nil
 }

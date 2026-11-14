@@ -78,7 +78,7 @@ func (r *fakeRouter) Cleanup(route *Route) error {
 func (r *fakeRouter) Inspect(route *Route) (exists bool, conflict string, overlaps []string, err error) {
 	err = r.errorResponse
 	exists, conflict, overlaps = r.rt.Check(route)
-	return
+	return exists, conflict, overlaps, err
 }
 
 type stubConfigLoader struct {
@@ -86,10 +86,10 @@ type stubConfigLoader struct {
 	e error
 }
 
-func (l *stubConfigLoader) WriteConfigToFile(profileName string, cc *config.ClusterConfig, miniHome ...string) error {
+func (l *stubConfigLoader) WriteConfigToFile(_ string, _ *config.ClusterConfig, _ ...string) error {
 	return l.e
 }
 
-func (l *stubConfigLoader) LoadConfigFromFile(profile string, miniHome ...string) (*config.ClusterConfig, error) {
+func (l *stubConfigLoader) LoadConfigFromFile(_ string, _ ...string) (*config.ClusterConfig, error) {
 	return l.c, l.e
 }

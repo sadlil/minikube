@@ -20,7 +20,7 @@ DIR=$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )
 
 # Parse the token from `gh auth`
 GH_TOKEN=$(mktemp)
-gh auth status -t 2>&1 | sed -n -r 's/^.*Token: ([a-zA-Z0-9_]*)/\1/p' > "$GH_TOKEN"
+gh auth token > "$GH_TOKEN"
 
 # Ensure the token is deleted when the script exits, so the token is not leaked.
 function cleanup_token() {
@@ -28,31 +28,24 @@ function cleanup_token() {
 }
 trap cleanup_token EXIT
 
-install_release_notes_helper() {
-  release_notes_workdir="$(mktemp -d)"
-  trap 'rm -rf -- ${release_notes_workdir}' RETURN
+# changelog.go authenticates via GITHUB_TOKEN. Without it, GitHub's
+# unauthenticated limit (60 req/hr) is usually exceeded while listing PRs.
+export GITHUB_TOKEN
+GITHUB_TOKEN=$(cat "$GH_TOKEN")
 
-  # See https://stackoverflow.com/questions/56842385/using-go-get-to-download-binaries-without-adding-them-to-go-mod for this workaround
-  cd "${release_notes_workdir}"
-  go mod init release-notes
-  GOBIN="$DIR" go get github.com/corneliusweig/release-notes
-  GOBIN="$DIR" go get github.com/google/pullsheet
-  cd -
-}
-
-if ! [[ -x "${DIR}/release-notes" ]] || ! [[ -x "${DIR}/pullsheet" ]]; then
-  echo >&2 'Installing release-notes'
-  install_release_notes_helper
+if  ! [[ -x "${DIR}/pullsheet" ]]; then
+  echo >&2 'Installing pullsheet'
+  GOBIN="$DIR" go install github.com/google/pullsheet@latest
 fi
 
 git pull https://github.com/kubernetes/minikube.git master --tags
 recent=$(git describe --abbrev=0)
 recent_date=$(git log -1 --format=%as $recent)
 
-"${DIR}/release-notes" kubernetes minikube --since $recent
+go run hack/changelog/changelog.go
 
-echo ""
-echo "For a more detailed changelog, including changes occuring in pre-release versions, see [CHANGELOG.md](https://github.com/kubernetes/minikube/blob/master/CHANGELOG.md)."
+
+echo "For a more detailed changelog, including changes occurring in pre-release versions, see [CHANGELOG.md](https://github.com/kubernetes/minikube/blob/master/CHANGELOG.md)."
 echo ""
 
 echo "Thank you to our contributors for this release!"
@@ -74,6 +67,3 @@ if [[ "$recent" != *"beta"* ]]; then
   echo ""
   echo "Check out our [contributions leaderboard](https://minikube.sigs.k8s.io/docs/contrib/leaderboard/$recent/) for this release!"
 fi
-
-echo ""
-echo "Don't forget to run `make update-leaderboard` & `make time-to-k8s-benchmark`!"

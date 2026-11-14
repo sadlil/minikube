@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/olekukonko/tablewriter"
+	"github.com/olekukonko/tablewriter/tw"
 	"github.com/spf13/viper"
 	"k8s.io/minikube/pkg/minikube/config"
 	"k8s.io/minikube/pkg/minikube/constants"
@@ -30,14 +31,20 @@ import (
 
 // row is the log of a single command.
 type row struct {
-	args      string
-	command   string
-	endTime   string
-	profile   string
-	startTime string
-	user      string
-	version   string
-	Data      map[string]string `json:"data"`
+	SpecVersion     string            `json:"specversion"`
+	ID              string            `json:"id"`
+	Source          string            `json:"source"`
+	TypeField       string            `json:"type"`
+	DataContentType string            `json:"datacontenttype"`
+	Data            map[string]string `json:"data"`
+	args            string
+	command         string
+	endTime         string
+	id              string
+	profile         string
+	startTime       string
+	user            string
+	version         string
 }
 
 // Type returns the cloud events compatible type of this struct.
@@ -55,6 +62,7 @@ func (e *row) assignFields() {
 	e.startTime = e.Data["startTime"]
 	e.user = e.Data["user"]
 	e.version = e.Data["version"]
+	e.id = e.Data["id"]
 }
 
 // toMap combines fields into a string map,
@@ -68,11 +76,12 @@ func (e *row) toMap() map[string]string {
 		"startTime": e.startTime,
 		"user":      e.user,
 		"version":   e.version,
+		"id":        e.id,
 	}
 }
 
 // newRow creates a new audit row.
-func newRow(command string, args string, user string, version string, startTime time.Time, endTime time.Time, profile ...string) *row {
+func newRow(command string, args string, user string, version string, startTime time.Time, id string, profile ...string) *row {
 	p := viper.GetString(config.ProfileName)
 	if len(profile) > 0 {
 		p = profile[0]
@@ -80,11 +89,11 @@ func newRow(command string, args string, user string, version string, startTime 
 	return &row{
 		args:      args,
 		command:   command,
-		endTime:   endTime.Format(constants.TimeFormat),
 		profile:   p,
 		startTime: startTime.Format(constants.TimeFormat),
 		user:      user,
 		version:   version,
+		id:        id,
 	}
 }
 
@@ -116,11 +125,15 @@ func rowsToASCIITable(rows []row, headers []string) string {
 	}
 	b := new(bytes.Buffer)
 	t := tablewriter.NewWriter(b)
-	t.SetHeader(headers)
-	t.SetAutoFormatHeaders(false)
-	t.SetBorders(tablewriter.Border{Left: true, Top: true, Right: true, Bottom: true})
-	t.SetCenterSeparator("|")
-	t.AppendBulk(c)
-	t.Render()
+	t.Header(headers)
+	t.Options(
+		tablewriter.WithHeaderAutoFormat(tw.Off),
+	)
+	if err := t.Bulk(c); err != nil {
+		fmt.Fprintf(b, "Error adding rows: %v\n", err)
+	}
+	if err := t.Render(); err != nil {
+		fmt.Fprintf(b, "Error rendering table: %v", err)
+	}
 	return b.String()
 }

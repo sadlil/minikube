@@ -21,18 +21,86 @@
 
 set -x -o pipefail
 
+# Clean build artifacts first - if available space is very low, anything else may fail.
+echo "Cleaning out directory"
+rm -rf out
+
+# Clean stale Go caches that accumulate over time and can consume tens of GB.
+# The ISO build uses buildroot and does not need the host Go cache.
+# Clean it to prevent unbounded growth - only make generate-docs uses host Go.
+echo "Cleaning Go caches"
+go clean -cache -modcache || true
+chmod -R u+w "${GOPATH}/src" || true
+rm -rf "${GOPATH}/src" || true
+
+# Clean Jenkins deferred wipeout leftovers and stale workspaces that may still occupy disk.
+# Matches both @* (Jenkins deferred wipeout) and _ws-cleanup_* (WS-CLEANUP plugin) leftovers.
+echo "Stale workspace copies:"
+find "$(dirname "${WORKSPACE}")" -maxdepth 1 -name "$(basename "${WORKSPACE}")_*" -o -name "$(basename "${WORKSPACE}")@*" | sed 's/^/  /'
+echo ""
+chmod -R u+w "${WORKSPACE}"@* "${WORKSPACE}"_* || true
+rm -rf "${WORKSPACE}"@* "${WORKSPACE}"_* || true
+
+# Trim systemd journal to 1GB - no reason to keep gigabytes of logs on a build machine.
+sudo journalctl --vacuum-size=1G || true
+
 # Make sure gh is installed and configured
 ./hack/jenkins/installers/check_install_gh.sh
 
+# Make sure golang is installed and configured
+./hack/jenkins/installers/check_install_golang.sh "/usr/local"
+export PATH=/usr/local/go/bin:$PATH
+
+# install cron jobs
+source ./hack/jenkins/installers/check_install_linux_crons.sh
+
+# Generate changelog for latest github PRs merged
+./hack/jenkins/build_changelog.sh deploy/iso/minikube-iso/board/minikube/aarch64/rootfs-overlay/CHANGELOG
+./hack/jenkins/build_changelog.sh deploy/iso/minikube-iso/board/minikube/x86_64/rootfs-overlay/CHANGELOG
+
 # Make sure all required packages are installed
 sudo apt-get update
-sudo apt-get -y install build-essential unzip rsync bc python2 p7zip-full
+sudo apt-get -y install build-essential unzip rsync bc python3 p7zip-full cmake xorriso
+
+# Log Cmake version
+CMAKE_VERSION=$(cmake --version | head -n1 | awk '{print $3}')
+echo "Start of ISO build: CMake version: $CMAKE_VERSION"
+if dpkg --compare-versions "$CMAKE_VERSION" lt "3.20"; then
+	echo "WARNING: CMake version $CMAKE_VERSION is less than 3.20. this will cause a slower build due to rebuidling cmake ..."
+fi
+
+# Let's make sure we have the newest ISO reference
+
+# ISO tags are of the form VERSION-TIMESTAMP-PR, so this grep finds that TIMESTAMP in the middle.
+# If it doesn't exist, it will just return VERSION, which is covered in the if statement below.
+# Example: "v1.38.0-1782213340-23211" -> 1782213340
+# NOTE: tr -d '"' is needed because Makefile-head (from master) may still have quoted values.
+# This can be simplified once master no longer uses quotes around ISO_VERSION.
+curl -L https://github.com/kubernetes/minikube/raw/master/Makefile --output Makefile-head
+head_iso_timestamp=$(grep -E "ISO_VERSION \?= " Makefile-head | cut -d " " -f 3 | tr -d '"' | cut -d "-" -f 2)
+
+# NOTE: The PR's Makefile may also have quoted values if the PR was created before this fix.
+# Example: ISO_VERSION ?= "v1.38.0-1782213340-23211" -> v1.38.0-1782213340-23211
+current_iso_value=$(grep -E "ISO_VERSION \?= " Makefile | cut -d " " -f 3 | tr -d '"')
+
+# Example: v1.38.0-1782213340-23211 -> 1782213340
+current_iso_timestamp=$(echo "$current_iso_value" | cut -d "-" -f 2)
+
+if [[ $head_iso_timestamp != v* ]]; then
+	diff=$((current_iso_timestamp-head_iso_timestamp))
+	if [[ $current_iso_timestamp == v* ]] || [ $diff -lt 0 ]; then
+		gh pr comment ${ghprbPullId} --body "Hi ${ghprbPullAuthorLoginMention}, your ISO info is out of date. Please rebase."
+		exit 1
+	fi
+fi
+rm Makefile-head
 
 if [[ -z $ISO_VERSION ]]; then
 	release=false
-	IV=$(egrep "ISO_VERSION \?=" Makefile | cut -d " " -f 3 | cut -d "-" -f 1)
+	# Example: v1.38.0-1782213340-23211 -> v1.38.0
+	current_iso_version=$(echo "$current_iso_value" | cut -d "-" -f 1)
 	now=$(date +%s)
-	export ISO_VERSION=$IV-$now-$ghprbPullId
+	export ISO_VERSION=$current_iso_version-$now-$ghprbPullId
 	export ISO_BUCKET=minikube-builds/iso/$ghprbPullId
 else
 	release=true
@@ -40,27 +108,59 @@ else
 	export ISO_BUCKET
 fi
 
-make release-iso | tee iso-logs.txt
-# Abort with error message if above command failed
-ec=$?
-if [ $ec -gt 0 ]; then
-	if [ "$release" = false ]; then
-		gh pr comment ${ghprbPullId} --body "Hi ${ghprbPullAuthorLoginMention}, building a new ISO failed.  
-		See the logs at: https://storage.cloud.google.com/minikube-builds/logs/${ghprbPullId}/iso-${BUILD_NUMBER}/iso_build.txt
-		"
-	fi
-	exit $ec
+# Check available space after all installs - fail early if insufficient
+echo "Disk space before ISO build:"
+df -h .
+
+required_gb=100
+available_gb=$(df --output=avail . | tail -1 | awk '{printf "%.0f", $1/1024/1024}')
+echo "Available disk space: ${available_gb}GB"
+if [ "$available_gb" -lt "$required_gb" ]; then
+    echo "ERROR: Not enough disk space for ISO build. Available: ${available_gb}GB, required: at least ${required_gb}GB"
+    ./hack/jenkins/investigate_disk_usage.sh || true
+    body=$(cat << EOF
+Hi ${ghprbPullAuthorLoginMention}, building a new ISO failed for Commit ${ghprbActualCommit}
+Not enough disk space on build machine (${available_gb}GB available, need ${required_gb}GB).
+
+See the logs at:
+https://storage.cloud.google.com/minikube-builds/logs/${ghprbPullId}/${ghprbActualCommit::7}/iso_build.txt
+
+Please contact the maintainers to clean up the ISO build node.
+EOF
+)
+    gh pr comment "${ghprbPullId}" --body "$body"
+    exit 1
+fi
+
+if ! make release-iso 2>&1 | tee iso-logs.txt; then
+    # Exit of `make` (PIPESTATUS[0]); fallback to 1 if unavailable
+    ec=${PIPESTATUS[0]:-1}
+
+    # Only comment on non-release; default release=false if unset
+    if [[ ${release:-false} != "true" ]]; then
+        body=$(cat << EOF
+Hi ${ghprbPullAuthorLoginMention}, building a new ISO failed for Commit ${ghprbActualCommit}
+See the logs at:
+https://storage.cloud.google.com/minikube-builds/logs/${ghprbPullId}/${ghprbActualCommit::7}/iso_build.txt
+EOF
+)
+	    gh pr comment "${ghprbPullId}" --body "$body"
+    fi
+    exit "$ec"
 fi
 
 git config user.name "minikube-bot"
-git config user.email "minikube-bot@google.com"
+git config user.email "20374350+minikube-bot@users.noreply.github.com"
 
 if [ "$release" = false ]; then
-	# Update the user's PR with newly build ISO
+	# Update the user's PR with the newly built ISO.
+	# We use `gh pr checkout` because it sets up the fork remote over HTTPS
+	# using the gh auth token, which allows pushing to fork PRs when "Allow
+	# edits from maintainers" is enabled. SSH-based push cannot work since
+	# the bot does not have SSH access to contributors' forks.
 
-	git remote add ${ghprbPullAuthorLogin} git@github.com:${ghprbPullAuthorLogin}/minikube.git
-	git fetch ${ghprbPullAuthorLogin}
-	git checkout -b ${ghprbPullAuthorLogin}-${ghprbSourceBranch} ${ghprbPullAuthorLogin}/${ghprbSourceBranch}
+	gh auth setup-git
+	gh pr checkout ${ghprbPullId}
 
 	sed -i "s/ISO_VERSION ?= .*/ISO_VERSION ?= ${ISO_VERSION}/" Makefile
 	sed -i "s|isoBucket := .*|isoBucket := \"${ISO_BUCKET}\"|" pkg/minikube/download/iso.go
@@ -68,16 +168,31 @@ if [ "$release" = false ]; then
 
 	git add Makefile pkg/minikube/download/iso.go site/content/en/docs/commands/start.md
 	git commit -m "Updating ISO to ${ISO_VERSION}"
-	git push ${ghprbPullAuthorLogin} HEAD:${ghprbSourceBranch}
+	if git push; then
+		message=$(cat <<EOF
+Hi ${ghprbPullAuthorLoginMention}, we have updated your PR with the reference to newly built ISO.
+Pull the changes locally if you want to test with them or update your PR further.
 
-	message="Hi ${ghprbPullAuthorLoginMention}, we have updated your PR with the reference to newly built ISO. Pull the changes locally if you want to test with them or update your PR further."
-	if [ $? -gt 0 ]; then
-		message="Hi ${ghprbPullAuthorLoginMention}, we failed to push the reference to the ISO to your PR. Please run the following command and push manually.
+Build logs (for reference):
+https://storage.cloud.google.com/minikube-builds/logs/${ghprbPullId}/${ghprbActualCommit::7}/iso_build.txt
+EOF
+)
+	else
+		message=$(cat <<EOF
+Hi ${ghprbPullAuthorLoginMention}, we built a new ISO but failed to push the update to your PR.
+Please run the following commands and push manually:
 
-		sed -i 's/ISO_VERSION ?= .*/ISO_VERSION ?= ${ISO_VERSION}/' Makefile; sed -i 's|isoBucket := .*|isoBucket := "${ISO_BUCKET}"|' pkg/minikube/download/iso.go; make generate-docs;
-		"
+\`\`\`
+sed -i 's/ISO_VERSION ?= .*/ISO_VERSION ?= ${ISO_VERSION}/' Makefile
+sed -i 's|isoBucket := .*|isoBucket := "${ISO_BUCKET}"|' pkg/minikube/download/iso.go
+make generate-docs
+\`\`\`
+
+See the build logs for more details:
+https://storage.cloud.google.com/minikube-builds/logs/${ghprbPullId}/${ghprbActualCommit::7}/iso_build.txt
+EOF
+)
 	fi
-	
 	gh pr comment ${ghprbPullId} --body "${message}"
 else
 	# Release!
@@ -89,9 +204,9 @@ else
 	make generate-docs
 
 	git add Makefile pkg/minikube/download/iso.go site/content/en/docs/commands/start.md
-	git commit -m "Update ISO to ${ISO_VERSION}"
+	git commit -m "Release: Update ISO to ${ISO_VERSION}"
 	git remote add minikube-bot git@github.com:minikube-bot/minikube.git
 	git push -f minikube-bot ${branch}
 
-	gh pr create --fill --base master --head minikube-bot:${branch}
-fi	
+	gh pr create --fill --base master --head minikube-bot:${branch} -l "ok-to-test"
+fi

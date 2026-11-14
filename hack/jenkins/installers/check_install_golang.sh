@@ -16,21 +16,21 @@
 
 set -eux -o pipefail
 
-if (($# < 2)); then
-  echo "ERROR: given ! ($#) number of parameters but expect 2."
-  echo "USAGE: ./check_install_golang.sh VERSION_TO_INSTALL INSTALL_PATH"
+if (($# < 1)); then
+  echo "ERROR: given ! ($#) parameters but expected 1."
+  echo "USAGE: ./check_install_golang.sh INSTALL_PATH"
   exit 1
 fi
 
-VERSION_TO_INSTALL=${1}
-INSTALL_PATH=${2}
+VERSION_TO_INSTALL=1.27.3
+INSTALL_PATH=${1}
 
 function current_arch() {
   case $(arch) in
-  "x86_64")
+  "x86_64" | "i386")
      echo "amd64"
   ;;
-  "aarch64")
+  "aarch64" | "arm64")
     echo "arm64"
   ;;
   *)
@@ -50,10 +50,12 @@ function check_and_install_golang() {
     return
   fi
 
+  sudo chown -R $USER:$USER "$INSTALL_PATH"/go
+
   # golang has been installed and check its version
-  if [[ $(go version) =~ (([0-9]+)\.([0-9]+).([0-9]+).([\.0-9]*)) ]]; then
+  if [[ $(go version | cut -d' ' -f 3) =~ go(([0-9]+)\.([0-9]+).([0-9]+)*) ]]; then
     HOST_VERSION=${BASH_REMATCH[1]}
-    if [ $HOST_VERSION = $VERSION_TO_INSTALL ]; then
+    if [ $HOST_VERSION == $VERSION_TO_INSTALL ]; then
       echo "go version on the host looks good : $HOST_VERSION"
     else
       echo "WARNING: expected go version to be $VERSION_TO_INSTALL but got $HOST_VERSION"
@@ -82,10 +84,11 @@ function install_golang() {
   # using sudo because previously installed versions might have been installed by a different user.
   # as it was the case on jenkins VM.
   sudo rm -rf "$GO_TGZ"
-  curl -qL -O "https://storage.googleapis.com/golang/$GO_TGZ"
+  curl -qL -O "https://go.dev/dl/$GO_TGZ"
   sudo rm -rf "$GO_DIR"
   sudo mkdir -p "$GO_DIR"
   sudo tar -C "$GO_DIR" --strip-components=1 -xzf "$GO_TGZ"
+  sudo chown -R $USER:$USER "$GO_DIR"
 
   popd >/dev/null
   echo "installed in $GO_DIR: $($GO_DIR/bin/go version)"

@@ -27,7 +27,6 @@ import (
 	"k8s.io/klog/v2"
 
 	texporter "github.com/GoogleCloudPlatform/opentelemetry-operations-go/exporter/trace"
-	"github.com/pkg/errors"
 )
 
 const (
@@ -43,13 +42,13 @@ type gcpTracer struct {
 	parentCtx context.Context
 	trace.Tracer
 	spans   map[string]trace.Span
-	cleanup func()
+	cleanup func(context.Context) error
 }
 
 // StartSpan starts a span for the next step of
 // `minikube start` via the GCP tracer
 func (t *gcpTracer) StartSpan(name string) {
-	_, span := t.Tracer.Start(t.parentCtx, name)
+	_, span := t.Start(t.parentCtx, name)
 	t.spans[name] = span
 }
 
@@ -69,7 +68,9 @@ func (t *gcpTracer) Cleanup() {
 	if ok {
 		span.End()
 	}
-	t.cleanup()
+	if err := t.cleanup(context.Background()); err != nil {
+		klog.Warningf("Fail to cleanup the trace: %s", err)
+	}
 }
 
 func initGCPTracer() (*gcpTracer, error) {
@@ -78,17 +79,19 @@ func initGCPTracer() (*gcpTracer, error) {
 		return nil, fmt.Errorf("GCP tracer requires a valid GCP project id set via the %s env variable", ProjectEnvVar)
 	}
 
-	_, flush, err := texporter.InstallNewPipeline(
-		[]texporter.Option{
-			texporter.WithProjectID(projectID),
-		},
-		sdktrace.WithConfig(sdktrace.Config{
-			DefaultSampler: sdktrace.AlwaysSample(),
-		}),
-	)
+	exporter, err := texporter.New([]texporter.Option{
+		texporter.WithProjectID(projectID),
+	}...)
 	if err != nil {
-		return nil, errors.Wrap(err, "installing pipeline")
+		return nil, fmt.Errorf("installing pipeline: %w", err)
 	}
+
+	tp := sdktrace.NewTracerProvider(
+		sdktrace.WithBatcher(exporter),
+		sdktrace.WithSampler(sdktrace.AlwaysSample()),
+	)
+
+	otel.SetTracerProvider(tp)
 
 	t := otel.Tracer(parentSpanName)
 
@@ -96,7 +99,7 @@ func initGCPTracer() (*gcpTracer, error) {
 	return &gcpTracer{
 		projectID: projectID,
 		parentCtx: ctx,
-		cleanup:   flush,
+		cleanup:   tp.Shutdown,
 		Tracer:    t,
 		spans: map[string]trace.Span{
 			parentSpanName: span,

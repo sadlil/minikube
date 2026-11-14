@@ -18,9 +18,9 @@ If a HTTP proxy is required to access the internet, you may need to pass the pro
 * `HTTPS_PROXY` - The URL to your HTTPS proxy
 * `NO_PROXY` - A comma-separated list of hosts which should not go through the proxy.
 
-The NO_PROXY variable here is important: Without setting it, minikube may not be able to access resources within the VM. minikube uses two IP ranges, which should not go through the proxy:
+The NO_PROXY variable here is important: Without setting it, minikube may not be able to access resources within the VM. minikube uses four default IP ranges, which should not go through the proxy:
 
-* **192.168.99.0/24**: Used by the minikube VM. Configurable for some hypervisors via `--host-only-cidr`
+* **192.168.59.0/24**: Used by the minikube VM. Configurable for some hypervisors via `--host-only-cidr`
 * **192.168.39.0/24**: Used by the minikube kvm2 driver.
 * **192.168.49.0/24**: Used by the minikube docker driver's first cluster.
 * **10.96.0.0/12**: Used by service cluster IP's. Configurable via  `--service-cluster-ip-range`
@@ -34,7 +34,7 @@ One important note: If NO_PROXY is required by non-Kubernetes applications, such
 ```shell
 export HTTP_PROXY=http://<proxy hostname:port>
 export HTTPS_PROXY=https://<proxy hostname:port>
-export NO_PROXY=localhost,127.0.0.1,10.96.0.0/12,192.168.99.0/24,192.168.39.0/24
+export NO_PROXY=localhost,127.0.0.1,10.96.0.0/12,192.168.59.0/24,192.168.49.0/24,192.168.39.0/24
 
 minikube start
 ```
@@ -46,7 +46,7 @@ To make the exported variables permanent, consider adding the declarations to ~/
 ```shell
 set HTTP_PROXY=http://<proxy hostname:port>
 set HTTPS_PROXY=https://<proxy hostname:port>
-set NO_PROXY=localhost,127.0.0.1,10.96.0.0/12,192.168.99.0/24,192.168.39.0/24
+set NO_PROXY=localhost,127.0.0.1,10.96.0.0/12,192.168.59.0/24,192.168.49.0/24,192.168.39.0/24
 
 minikube start
 ```
@@ -72,8 +72,8 @@ This error indicates that the host:port combination defined by HTTPS_PROXY or HT
 ```text
 Unable to pull images, which may be OK:
 
-failed to pull image "k8s.gcr.io/kube-apiserver:v1.13.3": output: Error response from daemon:
-Get https://k8s.gcr.io/v2/: net/http: request canceled while waiting for connection
+failed to pull image "registry.k8s.io/kube-apiserver:v1.13.3": output: Error response from daemon:
+Get https://registry.k8s.io/v2/: net/http: request canceled while waiting for connection
 (Client.Timeout exceeded while awaiting headers)
 ```
 
@@ -82,9 +82,9 @@ This error indicates that the container runtime running within the VM does not h
 #### x509: certificate signed by unknown authority
 
 ```text
-[ERROR ImagePull]: failed to pull image k8s.gcr.io/kube-apiserver:v1.13.3:
+[ERROR ImagePull]: failed to pull image registry.k8s.io/kube-apiserver:v1.13.3:
 output: Error response from daemon:
-Get https://k8s.gcr.io/v2/: x509: certificate signed by unknown authority
+Get https://registry.k8s.io/v2/: x509: certificate signed by unknown authority
 ```
 
 This is because minikube VM is stuck behind a proxy that rewrites HTTPS responses to contain its own TLS certificate. The [solution](https://github.com/kubernetes/minikube/issues/3613#issuecomment-461034222) is to install the proxy certificate into a location that is copied to the VM at startup, so that it can be validated.
@@ -107,7 +107,7 @@ The supplied value of `HTTPS_PROXY` is probably incorrect. Verify that this valu
 
 minikube requires access from the host to the following IP ranges:
 
-* **192.168.99.0/24**: Used by the minikube VM. Configurable for some hypervisors via `--host-only-cidr`
+* **192.168.59.0/24**: Used by the minikube VM. Configurable for some hypervisors via `--host-only-cidr`
 * **192.168.39.0/24**: Used by the minikube kvm2 driver.
 * **10.96.0.0/12**: Used by service cluster IP's. Configurable via  `--service-cluster-ip-range`
 

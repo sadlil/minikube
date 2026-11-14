@@ -19,11 +19,10 @@ package bsutil
 
 import (
 	"fmt"
-	"sort"
+	"slices"
 	"strings"
 
 	"github.com/blang/semver/v4"
-	"github.com/pkg/errors"
 	"k8s.io/klog/v2"
 	"k8s.io/minikube/pkg/minikube/config"
 )
@@ -87,7 +86,7 @@ func CreateFlagsFromExtraArgs(extraOptions config.ExtraOptionSlice) string {
 	// kubeadm allows only a small set of parameters to be supplied from the command line when the --config param
 	// is specified, here we remove those that are not allowed
 	for opt := range kubeadmExtraOpts {
-		if !config.ContainsParam(KubeadmExtraArgsAllowed[KubeadmCmdParam], opt) {
+		if !slices.Contains(KubeadmExtraArgsAllowed[KubeadmCmdParam], opt) {
 			// kubeadmExtraOpts is a copy so safe to delete
 			delete(kubeadmExtraOpts, opt)
 		}
@@ -115,7 +114,7 @@ func FindInvalidExtraConfigFlags(opts config.ExtraOptionSlice) []string {
 func extraConfigForComponent(component string, opts config.ExtraOptionSlice, version semver.Version) (map[string]string, error) {
 	versionedOpts, err := defaultOptionsForComponentAndVersion(component, version)
 	if err != nil {
-		return nil, errors.Wrapf(err, "setting version specific options for %s", component)
+		return nil, fmt.Errorf("setting version specific options for %s: %w", component, err)
 	}
 
 	for _, opt := range opts {
@@ -160,7 +159,7 @@ func newComponentOptions(opts config.ExtraOptionSlice, version semver.Version, f
 		}
 		extraConfig, err := extraConfigForComponent(component, opts, version)
 		if err != nil {
-			return nil, errors.Wrapf(err, "getting kubeadm extra args for %s", component)
+			return nil, fmt.Errorf("getting kubeadm extra args for %s: %w", component, err)
 		}
 		if featureGates != "" {
 			extraConfig["feature-gates"] = featureGates
@@ -169,7 +168,7 @@ func newComponentOptions(opts config.ExtraOptionSlice, version semver.Version, f
 			kubeadmExtraArgs = append(kubeadmExtraArgs, componentOptions{
 				Component: kubeadmComponentKey,
 				ExtraArgs: extraConfig,
-				Pairs:     optionPairsForComponent(component, version, cp),
+				Pairs:     optionPairsForComponent(component, cp),
 			})
 		}
 	}
@@ -178,9 +177,8 @@ func newComponentOptions(opts config.ExtraOptionSlice, version semver.Version, f
 }
 
 // optionPairsForComponent generates a map of value pairs for a k8s component
-func optionPairsForComponent(component string, version semver.Version, cp config.Node) map[string]string {
-	// For the ktmpl.V1Beta1 users
-	if component == Apiserver && version.GTE(semver.MustParse("1.14.0-alpha.0")) {
+func optionPairsForComponent(component string, cp config.Node) map[string]string {
+	if component == Apiserver {
 		return map[string]string{
 			"certSANs": fmt.Sprintf(`["127.0.0.1", "localhost", "%s"]`, cp.IP),
 		}
@@ -220,7 +218,7 @@ func convertToFlags(opts map[string]string) string {
 	for k := range opts {
 		keys = append(keys, k)
 	}
-	sort.Strings(keys)
+	slices.Sort(keys)
 	for _, k := range keys {
 		flags = append(flags, fmt.Sprintf("--%s=%s", k, opts[k]))
 	}

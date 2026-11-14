@@ -17,7 +17,6 @@ limitations under the License.
 package config
 
 import (
-	"io/ioutil"
 	"os"
 	"testing"
 
@@ -34,62 +33,67 @@ func TestNotFound(t *testing.T) {
 
 func TestSetNotAllowed(t *testing.T) {
 	createTestConfig(t)
-	err := Set("driver", "123456")
-	if err == nil || err.Error() != "run validations for \"driver\" with value of \"123456\": [driver \"123456\" is not supported]" {
-		t.Fatalf("Set did not return error for unallowed value: %+v", err)
-	}
-	err = Set("memory", "10a")
-	if err == nil || err.Error() != "run validations for \"memory\" with value of \"10a\": [invalid memory size: invalid size: '10a']" {
-		t.Fatalf("Set did not return error for unallowed value: %+v", err)
-	}
+	t.Run("driver", func(t *testing.T) {
+		err := Set("driver", "123456")
+		if err == nil || err.Error() != "run validations for \"driver\" with value of \"123456\": [driver \"123456\" is not supported]" {
+			t.Fatalf("Set did not return error for unallowed value: %+v", err)
+		}
+	})
+	t.Run("memory", func(t *testing.T) {
+		err := Set("memory", "10a")
+		if err == nil || err.Error() != "run validations for \"memory\" with value of \"10a\": [invalid memory size: invalid suffix: 'a']" {
+			t.Fatalf("Set did not return error for unallowed value: %+v", err)
+		}
+	})
+	t.Run("dns-servers", func(t *testing.T) {
+		err := Set("dns-servers", ",1.2.3.4")
+		if err == nil {
+			t.Fatalf("Set did not return error for invalid dns-servers value")
+		}
+	})
 }
 
 func TestSetOK(t *testing.T) {
 	createTestConfig(t)
-	err := Set("driver", "virtualbox")
-	defer func() {
-		err = Unset("driver")
+	t.Run("driver", func(t *testing.T) {
+		err := Set("driver", "ssh")
+		defer func() {
+			err = Unset("driver")
+			if err != nil {
+				t.Errorf("failed to unset driver: %+v", err)
+			}
+		}()
 		if err != nil {
-			t.Errorf("failed to unset driver: %+v", err)
+			t.Fatalf("Set returned error for valid property value: %+v", err)
 		}
-	}()
-	if err != nil {
-		t.Fatalf("Set returned error for valid property value: %+v", err)
-	}
-	val, err := Get("driver")
-	if err != nil {
-		t.Fatalf("Get returned error for valid property: %+v", err)
-	}
-	if val != "virtualbox" {
-		t.Fatalf("Get returned %s, expected \"virtualbox\"", val)
-	}
+		val, err := Get("driver")
+		if err != nil {
+			t.Fatalf("Get returned error for valid property: %+v", err)
+		}
+		if val != "ssh" {
+			t.Fatalf("Get returned %s, expected \"ssh\"", val)
+		}
+	})
+	t.Run("dns-servers", func(t *testing.T) {
+		err := Set("dns-servers", "8.8.8.8,1.1.1.1")
+		if err != nil {
+			t.Fatalf("Set returned error for valid dns-servers value: %+v", err)
+		}
+	})
 }
 
 func createTestConfig(t *testing.T) {
 	t.Helper()
-	td, err := ioutil.TempDir("", "config")
-	if err != nil {
-		t.Fatalf("tempdir: %v", err)
-	}
+	td := t.TempDir()
 
-	err = os.Setenv(localpath.MinikubeHome, td)
-	if err != nil {
-		t.Fatalf("error setting up test environment. could not set %s due to %+v", localpath.MinikubeHome, err)
-	}
+	t.Setenv(localpath.MinikubeHome, td)
 
 	// Not necessary, but it is a handy random alphanumeric
-	if err = os.MkdirAll(localpath.MakeMiniPath("config"), 0777); err != nil {
+	if err := os.MkdirAll(localpath.MakeMiniPath("config"), 0777); err != nil {
 		t.Fatalf("error creating temporary directory: %+v", err)
 	}
 
-	if err = os.MkdirAll(localpath.MakeMiniPath("profiles"), 0777); err != nil {
+	if err := os.MkdirAll(localpath.MakeMiniPath("profiles"), 0777); err != nil {
 		t.Fatalf("error creating temporary profiles directory: %+v", err)
 	}
-
-	t.Cleanup(func() {
-		err := os.RemoveAll(td)
-		if err != nil {
-			t.Errorf("failed to clean up temp folder  %q", td)
-		}
-	})
 }

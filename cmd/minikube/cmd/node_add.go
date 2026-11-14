@@ -19,6 +19,9 @@ package cmd
 import (
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
+
+	"k8s.io/klog/v2"
+	"k8s.io/minikube/cmd/minikube/cmd/flags"
 	"k8s.io/minikube/pkg/minikube/cni"
 	"k8s.io/minikube/pkg/minikube/config"
 	"k8s.io/minikube/pkg/minikube/driver"
@@ -26,52 +29,77 @@ import (
 	"k8s.io/minikube/pkg/minikube/mustload"
 	"k8s.io/minikube/pkg/minikube/node"
 	"k8s.io/minikube/pkg/minikube/out"
+	"k8s.io/minikube/pkg/minikube/out/register"
 	"k8s.io/minikube/pkg/minikube/reason"
 	"k8s.io/minikube/pkg/minikube/style"
 )
 
 var (
-	cp     bool
-	worker bool
+	cpNode              bool
+	workerNode          bool
+	deleteNodeOnFailure bool
 )
 
 var nodeAddCmd = &cobra.Command{
 	Use:   "add",
 	Short: "Adds a node to the given cluster.",
 	Long:  "Adds a node to the given cluster config, and starts it.",
-	Run: func(cmd *cobra.Command, args []string) {
-		co := mustload.Healthy(ClusterFlagValue())
+	Run: func(cmd *cobra.Command, _ []string) {
+		options := flags.CommandOptions()
+
+		co := mustload.Healthy(ClusterFlagValue(), options)
 		cc := co.Config
 
 		if driver.BareMetal(cc.Driver) {
 			out.FailureT("none driver does not support multi-node clusters")
 		}
 
-		name := node.Name(len(cc.Nodes) + 1)
+		if cpNode && !config.IsHA(*cc) {
+			out.FailureT("Adding a control-plane node to a non-HA (non-multi-control plane) cluster is not currently supported. Please first delete the cluster and use 'minikube start --ha' to create new one.")
+		}
 
-		out.Step(style.Happy, "Adding node {{.name}} to cluster {{.cluster}}", out.V{"name": name, "cluster": cc.Name})
+		roles := []string{}
+		if workerNode {
+			roles = append(roles, "worker")
+		}
+		if cpNode {
+			roles = append(roles, "control-plane")
+		}
 
-		// TODO: Deal with parameters better. Ideally we should be able to acceot any node-specific minikube start params here.
+		// calculate appropriate new node name with id following the last existing one
+		lastID, err := node.ID(cc.Nodes[len(cc.Nodes)-1].Name)
+		if err != nil {
+			lastID = len(cc.Nodes)
+			out.ErrLn("determining last node index (will assume %d): %v", lastID, err)
+		}
+		name := node.Name(lastID + 1)
+
+		out.Step(style.Happy, "Adding node {{.name}} to cluster {{.cluster}} as {{.roles}}", out.V{"name": name, "cluster": cc.Name, "roles": roles})
 		n := config.Node{
 			Name:              name,
-			Worker:            worker,
-			ControlPlane:      cp,
+			Worker:            workerNode,
+			ControlPlane:      cpNode,
 			KubernetesVersion: cc.KubernetesConfig.KubernetesVersion,
 		}
 
-		// Make sure to decrease the default amount of memory we use per VM if this is the first worker node
 		if len(cc.Nodes) == 1 {
 			if viper.GetString(memory) == "" {
-				cc.Memory = 2200
+				sysLimit, containerLimit, err := memoryLimits(cc.Driver)
+				if err != nil {
+					klog.Warningf("Unable to query memory limits: %v", err)
+				}
+				totalNodes := len(cc.Nodes) + 1
+				cc.Memory = suggestMemoryAllocation(sysLimit, containerLimit, totalNodes)
 			}
 
-			if !cc.MultiNodeRequested || cni.IsDisabled(*cc) {
+			if !cc.MultiNodeRequested && cni.IsDisabled(*cc) {
 				warnAboutMultiNodeCNI()
 			}
 		}
 
-		if err := node.Add(cc, n, false); err != nil {
-			_, err := maybeDeleteAndRetry(cmd, *cc, n, nil, err)
+		register.Reg.SetStep(register.InitialSetup)
+		if err := node.Add(cc, n, deleteNodeOnFailure, options); err != nil {
+			_, err := maybeDeleteAndRetry(cmd, *cc, n, nil, err, options)
 			if err != nil {
 				exit.Error(reason.GuestNodeAdd, "failed to add node", err)
 			}
@@ -86,10 +114,9 @@ var nodeAddCmd = &cobra.Command{
 }
 
 func init() {
-	// TODO(https://github.com/kubernetes/minikube/issues/7366): We should figure out which minikube start flags to actually import
-	nodeAddCmd.Flags().BoolVar(&cp, "control-plane", false, "If true, the node added will also be a control plane in addition to a worker.")
-	nodeAddCmd.Flags().BoolVar(&worker, "worker", true, "If true, the added node will be marked for work. Defaults to true.")
-	nodeAddCmd.Flags().Bool(deleteOnFailure, false, "If set, delete the current cluster if start fails and try again. Defaults to false.")
+	nodeAddCmd.Flags().BoolVar(&cpNode, "control-plane", false, "If set, added node will become a control-plane. Defaults to false. Currently only supported for existing HA (multi-control plane) clusters.")
+	nodeAddCmd.Flags().BoolVar(&workerNode, "worker", true, "If set, added node will be available as worker. Defaults to true.")
+	nodeAddCmd.Flags().BoolVar(&deleteNodeOnFailure, "delete-on-failure", false, "If set, delete the current cluster if start fails and try again. Defaults to false.")
 
 	nodeCmd.AddCommand(nodeAddCmd)
 }

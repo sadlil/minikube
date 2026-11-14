@@ -22,17 +22,19 @@ import (
 	"os/exec"
 	"path/filepath"
 
-	"github.com/pkg/errors"
+	"errors"
+
 	"golang.org/x/sys/windows/registry"
 )
 
 // supportedDrivers is a list of supported drivers on Windows.
 var supportedDrivers = []string{
 	VirtualBox,
-	VMwareFusion,
 	HyperV,
 	VMware,
+	QEMU2,
 	Docker,
+	Podman,
 	SSH,
 }
 

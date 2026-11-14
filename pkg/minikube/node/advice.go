@@ -20,17 +20,19 @@ import (
 	"fmt"
 	"runtime"
 
-	"github.com/pkg/errors"
+	"errors"
+
 	"k8s.io/minikube/pkg/drivers/kic/oci"
 	"k8s.io/minikube/pkg/minikube/bootstrapper/kubeadm"
 	"k8s.io/minikube/pkg/minikube/cruntime"
 	"k8s.io/minikube/pkg/minikube/exit"
+	"k8s.io/minikube/pkg/minikube/out"
 	"k8s.io/minikube/pkg/minikube/reason"
 	"k8s.io/minikube/pkg/minikube/style"
 )
 
 // ExitIfFatal before exiting will try to check for different error types and provide advice if we know for sure what the error is
-func ExitIfFatal(err error) {
+func ExitIfFatal(err error, force bool) {
 	if err == nil {
 		return
 	}
@@ -52,7 +54,10 @@ func ExitIfFatal(err error) {
 		if runtime.GOOS == "windows" {
 			exit.Message(reason.RsrcInsufficientWindowsDockerCores, "Docker Desktop has less than 2 CPUs configured, but Kubernetes requires at least 2 to be available")
 		}
-		exit.Message(reason.RsrcInsufficientCores, "Docker has less than 2 CPUs available, but Kubernetes requires at least 2 to be available")
+		if !force {
+			exit.Message(reason.RsrcInsufficientCores, "Docker has less than 2 CPUs available, but Kubernetes requires at least 2 to be available")
+		}
+		out.Error(reason.RsrcInsufficientCores, "Docker has less than 2 CPUs available, but Kubernetes requires at least 2 to be available")
 	}
 
 	if errors.Is(err, kubeadm.ErrNoExecLinux) {

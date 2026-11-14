@@ -19,6 +19,7 @@ package machine
 import (
 	"flag"
 	"fmt"
+	"slices"
 	"testing"
 	"time"
 
@@ -26,19 +27,20 @@ import (
 	"k8s.io/minikube/pkg/minikube/constants"
 	"k8s.io/minikube/pkg/minikube/download"
 	_ "k8s.io/minikube/pkg/minikube/registry/drvs/virtualbox"
+	"k8s.io/minikube/pkg/minikube/run"
 
-	"github.com/docker/machine/libmachine/drivers"
-	"github.com/docker/machine/libmachine/host"
-	"github.com/docker/machine/libmachine/provision"
-	"github.com/docker/machine/libmachine/state"
 	"github.com/spf13/viper"
+	"k8s.io/minikube/pkg/libmachine/drivers"
+	"k8s.io/minikube/pkg/libmachine/host"
+	"k8s.io/minikube/pkg/libmachine/provision"
+	"k8s.io/minikube/pkg/libmachine/state"
 	"k8s.io/minikube/pkg/minikube/config"
 	"k8s.io/minikube/pkg/minikube/driver"
 	"k8s.io/minikube/pkg/minikube/registry"
 	"k8s.io/minikube/pkg/minikube/tests"
 )
 
-func createMockDriverHost(c config.ClusterConfig, n config.Node) (interface{}, error) {
+func createMockDriverHost(_ config.ClusterConfig, _ config.Node) (interface{}, error) {
 	return nil, nil
 }
 
@@ -57,7 +59,7 @@ func RegisterMockDriver(t *testing.T) {
 	err := registry.Register(registry.DriverDef{
 		Name:   driver.Mock,
 		Config: createMockDriverHost,
-		Init:   func() drivers.Driver { return &tests.MockDriver{T: t} },
+		Init:   func(_ *run.CommandOptions) drivers.Driver { return &tests.MockDriver{T: t} },
 	})
 	if err != nil {
 		t.Fatalf("register failed: %v", err)
@@ -72,8 +74,7 @@ var defaultClusterConfig = config.ClusterConfig{
 }
 
 func TestCreateHost(t *testing.T) {
-	tempDir := tests.MakeTempDir()
-	defer tests.RemoveTempDir(tempDir)
+	tests.MakeTempDir(t)
 
 	download.DownloadMock = download.CreateDstDownloadMock
 
@@ -120,8 +121,7 @@ func TestCreateHost(t *testing.T) {
 }
 
 func TestStartHostExists(t *testing.T) {
-	tempDir := tests.MakeTempDir()
-	defer tests.RemoveTempDir(tempDir)
+	tests.MakeTempDir(t)
 
 	download.DownloadMock = download.CreateDstDownloadMock
 
@@ -160,8 +160,7 @@ func TestStartHostExists(t *testing.T) {
 }
 
 func TestStartHostErrMachineNotExist(t *testing.T) {
-	tempDir := tests.MakeTempDir()
-	defer tests.RemoveTempDir(tempDir)
+	tests.MakeTempDir(t)
 
 	download.DownloadMock = download.CreateDstDownloadMock
 
@@ -210,8 +209,7 @@ func TestStartHostErrMachineNotExist(t *testing.T) {
 }
 
 func TestStartStoppedHost(t *testing.T) {
-	tempDir := tests.MakeTempDir()
-	defer tests.RemoveTempDir(tempDir)
+	tests.MakeTempDir(t)
 
 	download.DownloadMock = download.CreateDstDownloadMock
 
@@ -250,8 +248,7 @@ func TestStartStoppedHost(t *testing.T) {
 }
 
 func TestStartHost(t *testing.T) {
-	tempDir := tests.MakeTempDir()
-	defer tests.RemoveTempDir(tempDir)
+	tests.MakeTempDir(t)
 
 	download.DownloadMock = download.CreateDstDownloadMock
 
@@ -283,8 +280,7 @@ func TestStartHost(t *testing.T) {
 }
 
 func TestStartHostConfig(t *testing.T) {
-	tempDir := tests.MakeTempDir()
-	defer tests.RemoveTempDir(tempDir)
+	tests.MakeTempDir(t)
 
 	download.DownloadMock = download.CreateDstDownloadMock
 
@@ -305,9 +301,13 @@ func TestStartHostConfig(t *testing.T) {
 		t.Fatal("Error starting host.")
 	}
 
-	for i := range h.HostOptions.EngineOptions.Env {
-		if h.HostOptions.EngineOptions.Env[i] != cfg.DockerEnv[i] {
-			t.Fatalf("Docker env variables were not set! got %+v but want %+v", h.HostOptions.EngineOptions.Env, cfg.DockerEnv)
+	// Verify that the expected Docker environment variables are set.
+	// Note: We check if the expected variables are present in the actual slice rather than
+	// performing a strict exact-index match because other variables (like proxy variables
+	// e.g., NO_PROXY) may be automatically injected into EngineOptions.Env by minikube.
+	for _, expected := range cfg.DockerEnv {
+		if !slices.Contains(h.HostOptions.EngineOptions.Env, expected) {
+			t.Fatalf("Docker env variable %q was not set! got %+v", expected, h.HostOptions.EngineOptions.Env)
 		}
 	}
 
@@ -328,8 +328,7 @@ func TestStopHostError(t *testing.T) {
 }
 
 func TestStopHost(t *testing.T) {
-	tempDir := tests.MakeTempDir()
-	defer tests.RemoveTempDir(tempDir)
+	tests.MakeTempDir(t)
 
 	RegisterMockDriver(t)
 	api := tests.NewMockAPI(t)
@@ -350,8 +349,7 @@ func TestStopHost(t *testing.T) {
 }
 
 func TestDeleteHost(t *testing.T) {
-	tempDir := tests.MakeTempDir()
-	defer tests.RemoveTempDir(tempDir)
+	tests.MakeTempDir(t)
 
 	RegisterMockDriver(t)
 	api := tests.NewMockAPI(t)
@@ -368,8 +366,7 @@ func TestDeleteHost(t *testing.T) {
 }
 
 func TestDeleteHostErrorDeletingVM(t *testing.T) {
-	tempDir := tests.MakeTempDir()
-	defer tests.RemoveTempDir(tempDir)
+	tests.MakeTempDir(t)
 
 	RegisterMockDriver(t)
 	api := tests.NewMockAPI(t)
@@ -387,8 +384,7 @@ func TestDeleteHostErrorDeletingVM(t *testing.T) {
 }
 
 func TestDeleteHostErrorDeletingFiles(t *testing.T) {
-	tempDir := tests.MakeTempDir()
-	defer tests.RemoveTempDir(tempDir)
+	tests.MakeTempDir(t)
 
 	RegisterMockDriver(t)
 	api := tests.NewMockAPI(t)
@@ -403,8 +399,7 @@ func TestDeleteHostErrorDeletingFiles(t *testing.T) {
 }
 
 func TestDeleteHostErrMachineNotExist(t *testing.T) {
-	tempDir := tests.MakeTempDir()
-	defer tests.RemoveTempDir(tempDir)
+	tests.MakeTempDir(t)
 
 	RegisterMockDriver(t)
 	api := tests.NewMockAPI(t)
@@ -421,8 +416,7 @@ func TestDeleteHostErrMachineNotExist(t *testing.T) {
 }
 
 func TestStatus(t *testing.T) {
-	tempDir := tests.MakeTempDir()
-	defer tests.RemoveTempDir(tempDir)
+	tests.MakeTempDir(t)
 
 	RegisterMockDriver(t)
 	api := tests.NewMockAPI(t)

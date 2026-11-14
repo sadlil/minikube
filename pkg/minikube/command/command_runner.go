@@ -28,9 +28,14 @@ import (
 	"sync"
 	"time"
 
-	"github.com/pkg/errors"
+	"errors"
+
 	"k8s.io/minikube/pkg/minikube/assets"
 )
+
+// NotFound is the POSIX exit code returned when the command binary
+// does not exist.
+const NotFound = 127
 
 var (
 	// ErrPrefix notes an error
@@ -45,8 +50,10 @@ var (
 
 // RunResult holds the results of a Runner
 type RunResult struct {
-	Stdout   bytes.Buffer
-	Stderr   bytes.Buffer
+	Stdout bytes.Buffer
+	Stderr bytes.Buffer
+	// ExitCode is the exit code of the command, or NotFound if the binary
+	// does not exist.
 	ExitCode int
 	Args     []string // the args that was passed to Runner
 }
@@ -61,12 +68,12 @@ type StartedCmd struct {
 // Runner represents an interface to run commands.
 type Runner interface {
 	// RunCmd runs a cmd of exec.Cmd type. allowing user to set cmd.Stdin, cmd.Stdout,...
-	// not all implementors are guaranteed to handle all the properties of cmd.
+	// not all implementers are guaranteed to handle all the properties of cmd.
 	RunCmd(cmd *exec.Cmd) (*RunResult, error)
 
 	// StartCmd starts a cmd of exec.Cmd type.
 	// This func in non-blocking, use WaitCmd to block until complete.
-	// Not all implementors are guaranteed to handle all the properties of cmd.
+	// Not all implementers are guaranteed to handle all the properties of cmd.
 	StartCmd(cmd *exec.Cmd) (*StartedCmd, error)
 
 	// WaitCmd will prevent further execution until the started command has completed.
@@ -75,8 +82,14 @@ type Runner interface {
 	// Copy is a convenience method that runs a command to copy a file
 	Copy(assets.CopyableFile) error
 
+	// CopyFrom is a convenience method that runs a command to copy a file back
+	CopyFrom(assets.CopyableFile) error
+
 	// Remove is a convenience method that runs a command to remove a file
 	Remove(assets.CopyableFile) error
+
+	// ReadableFile open a remote file for reading
+	ReadableFile(sourcePath string) (assets.ReadableFile, error)
 }
 
 // Command returns a human readable command string that does not induce eye fatigue
@@ -85,10 +98,10 @@ func (rr RunResult) Command() string {
 	sb.WriteString(rr.Args[0])
 	for _, a := range rr.Args[1:] {
 		if strings.Contains(a, " ") {
-			sb.WriteString(fmt.Sprintf(` "%s"`, a))
+			fmt.Fprintf(&sb, ` "%s"`, a)
 			continue
 		}
-		sb.WriteString(fmt.Sprintf(" %s", a))
+		fmt.Fprintf(&sb, " %s", a)
 	}
 	return sb.String()
 }
@@ -97,10 +110,10 @@ func (rr RunResult) Command() string {
 func (rr RunResult) Output() string {
 	var sb strings.Builder
 	if rr.Stdout.Len() > 0 {
-		sb.WriteString(fmt.Sprintf("-- stdout --\n%s\n-- /stdout --", rr.Stdout.Bytes()))
+		fmt.Fprintf(&sb, "-- stdout --\n%s\n-- /stdout --", rr.Stdout.Bytes())
 	}
 	if rr.Stderr.Len() > 0 {
-		sb.WriteString(fmt.Sprintf("\n** stderr ** \n%s\n** /stderr **", rr.Stderr.Bytes()))
+		fmt.Fprintf(&sb, "\n** stderr ** \n%s\n** /stderr **", rr.Stderr.Bytes())
 	}
 	return sb.String()
 }
@@ -132,7 +145,7 @@ func teePrefix(prefix string, r io.Reader, w io.Writer, logger func(format strin
 	if line.Len() > 0 {
 		logger("%s%s", prefix, line.String())
 	}
-	return nil
+	return scanner.Err()
 }
 
 // fileExists checks that the same file exists on the other end
@@ -186,22 +199,30 @@ func fileExists(r Runner, f assets.CopyableFile, dst string) (bool, error) {
 	return srcModTime.Equal(dstModTime), nil
 }
 
-// writeFile is like ioutil.WriteFile, but does not require reading file into memory
+// writeFile is like os.WriteFile, but does not require reading file into memory
 func writeFile(dst string, f assets.CopyableFile, perms os.FileMode) error {
 	w, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE, perms)
 	if err != nil {
-		return errors.Wrap(err, "create")
+		return fmt.Errorf("create: %w", err)
 	}
 	defer w.Close()
 
-	r := f.(io.Reader)
+	r, ok := f.(io.Reader)
+	if !ok {
+		return fmt.Errorf("file %s does not implement io.Reader", f.GetSourcePath())
+	}
 	n, err := io.Copy(w, r)
 	if err != nil {
-		return errors.Wrap(err, "copy")
+		return fmt.Errorf("copy: %w", err)
 	}
 
 	if n != int64(f.GetLength()) {
 		return fmt.Errorf("%s: expected to write %d bytes, but wrote %d instead", dst, f.GetLength(), n)
 	}
+
+	if err := w.Chmod(perms); err != nil {
+		return fmt.Errorf("chmod: %w", err)
+	}
+
 	return w.Close()
 }

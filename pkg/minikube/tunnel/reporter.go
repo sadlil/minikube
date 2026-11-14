@@ -18,6 +18,7 @@ package tunnel
 
 import (
 	"fmt"
+	"reflect"
 
 	"io"
 	"strings"
@@ -38,7 +39,7 @@ type simpleReporter struct {
 const noErrors = "no errors"
 
 func (r *simpleReporter) Report(tunnelState *Status) {
-	if r.lastState == tunnelState {
+	if reflect.DeepEqual(r.lastState, tunnelState) {
 		return
 	}
 	r.lastState = tunnelState
@@ -67,7 +68,7 @@ func (r *simpleReporter) Report(tunnelState *Status) {
 		loadbalancer emulator: %s
 `, minikubeError, routerError, lbError)
 
-	_, err := r.out.Write([]byte(fmt.Sprintf(
+	_, err := fmt.Fprintf(r.out,
 		`Status:	
 	machine: %s
 	pid: %d
@@ -79,7 +80,7 @@ func (r *simpleReporter) Report(tunnelState *Status) {
 		tunnelState.TunnelID.Route,
 		minikubeState,
 		managedServices,
-		errors)))
+		errors)
 	if err != nil {
 		klog.Errorf("failed to report state %s", err)
 	}

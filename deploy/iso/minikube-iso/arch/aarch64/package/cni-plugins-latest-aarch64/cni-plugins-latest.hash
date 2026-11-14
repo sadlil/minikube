@@ -1,0 +1,13 @@
+sha256 a7881ec37e592c897bdfd2a225b4ed74caa981e3c4cdcf8f45574f8d2f111bce  cni-plugins-linux-arm64-v0.8.5.tgz
+sha256 de7a666fd6ad83a228086bd55756db62ef335a193d1b143d910b69f079e30598  cni-plugins-linux-arm64-v1.3.0.tgz
+sha256 304d4389d5b732b7a73513d002c4895f731d030682d40653f411e10e39114194  cni-plugins-linux-arm64-v1.4.0.tgz
+sha256 56fe62d73942cffd8f119d2b8ecb6a062e85f529a3dbfc7aa5cd83c2c01929a7  cni-plugins-linux-arm64-v1.4.1.tgz
+sha256 ab38507efe50c34bc2242a25c5783c19fdfe0376c65a2a91d48174d4f39f1fc2  cni-plugins-linux-arm64-v1.5.0.tgz
+sha256 c2a292714d0fad98a3491ae43df8ad58354b3c0bdf5d5a3e281777967c70fcff  cni-plugins-linux-arm64-v1.5.1.tgz
+sha256 db09ab057ecf60b05ba05cbec38d55b95cc139c7f1078e2e4857cc13af158cee  cni-plugins-linux-arm64-v1.6.0.tgz
+sha256 f0f440b968ab50ad13d9d42d993ba98ec30b2ec666846f4ef1bddc7646a701cc  cni-plugins-linux-arm64-v1.6.1.tgz
+sha256 01e0e22acc7f7004e4588c1fe1871cc86d7ab562cd858e1761c4641d89ebfaa4  cni-plugins-linux-arm64-v1.6.2.tgz
+sha256 119fcb508d1ac2149e49a550752f9cd64d023a1d70e189b59c476e4d2bf7c497  cni-plugins-linux-arm64-v1.7.1.tgz
+sha256 57ce466fc3b79db1f19b8f4c63e07a1112306efa53c94fe810a2150dd9e07ddb  cni-plugins-linux-arm64-v1.8.0.tgz
+sha256 2596ef56329dd1269026f46b8df262f09ba43c92dbfb940e1e69fbccccd30a29  cni-plugins-linux-arm64-v1.9.0.tgz
+sha256 56171987d3947707c3563db2f4001bccaf50fd63468611b9f3cbecb1375ee7ec  cni-plugins-linux-arm64-v1.9.1.tgz
